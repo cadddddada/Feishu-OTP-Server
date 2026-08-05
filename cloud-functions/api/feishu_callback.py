@@ -11,6 +11,7 @@ import requests
 from http.server import BaseHTTPRequestHandler
 from Crypto.Cipher import AES
 import pyotp
+from pypinyin import pinyin, Style
 
 # ==================== 配置 ====================
 VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN", "")
@@ -55,6 +56,15 @@ def kv_delete(key):
     except Exception as e:
         print(f"KV delete error: {e}")
 
+# ==================== 拼音转换 ====================
+def chinese_to_pinyin(text):
+    """中文转拼音大写，非中文原样返回大写"""
+    try:
+        result = ''.join([item[0] for item in pinyin(text, style=Style.NORMAL)])
+        return result.upper()
+    except Exception:
+        return text.upper()
+
 # 获取 token（KV 缓存）
 def get_tenant_access_token():
     cached = kv_get("tenant_access_token")
@@ -72,18 +82,22 @@ def get_tenant_access_token():
     return token
 
 # ==================== 消息发送与更新 ====================
-def send_help(receive_id):
+def send_text_message(receive_id, text_content):
+    """发送纯文本消息"""
     token = get_tenant_access_token()
     url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {
         "receive_id": receive_id,
         "msg_type": "text",
-        "content": json.dumps({"text": "发送\u201COTP\u201D或\u201C密钥\u201D获取当前动态密码。"})
+        "content": json.dumps({"text": text_content})
     }
     requests.post(url, headers=headers, json=payload, timeout=10)
 
-def send_otp_card(receive_id, code, remaining_seconds, user_id):
+def send_help(receive_id):
+    send_text_message(receive_id, "发送\u201CxxxOTP\u201D或\u201Cxxx验证码\u201D获取动态密码，例如\u201C阿里云OTP\u201D。")
+
+def send_otp_card(receive_id, code, remaining_seconds, user_id, key_name=None):
     token = get_tenant_access_token()
     url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
     card = {
@@ -162,7 +176,7 @@ def send_otp_card(receive_id, code, remaining_seconds, user_id):
             ]
         },
         "header": {
-            "title": {"tag": "plain_text", "content": "OTP动态密钥"},
+            "title": {"tag": "plain_text", "content": f"{key_name} OTP动态密钥" if key_name else "OTP动态密钥"},
             "subtitle": {"tag": "plain_text", "content": ""},
             "text_tag_list": [{
                 "tag": "text_tag",
@@ -185,7 +199,7 @@ def send_otp_card(receive_id, code, remaining_seconds, user_id):
         raise Exception(f"发送卡片失败: {result.get('msg')}")
     return result["data"]["message_id"]
 
-def update_otp_card(message_id, user_id):
+def update_otp_card(message_id, user_id, key_name=None):
     token = get_tenant_access_token()
     url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}"
     card = {
@@ -264,7 +278,7 @@ def update_otp_card(message_id, user_id):
             ]
         },
         "header": {
-            "title": {"tag": "plain_text", "content": "OTP动态密钥"},
+            "title": {"tag": "plain_text", "content": f"{key_name} OTP动态密钥" if key_name else "OTP动态密钥"},
             "subtitle": {"tag": "plain_text", "content": ""},
             "text_tag_list": [{
                 "tag": "text_tag",
@@ -282,10 +296,11 @@ def update_otp_card(message_id, user_id):
         raise Exception(f"更新卡片失败: {resp.text}")
     return resp.json()
 
-def send_management_card(user_id, request_time, expire_time_str):
+def send_management_card(user_id, request_time, expire_time_str, key_name=None):
     """发送管理群卡片通知"""
     if not MANAGEMENT_WEBHOOK:
         return
+    key_display = f"{key_name} OTP" if key_name else "默认 OTP"
     card = {
         "schema": "2.0",
         "config": {"update_multi": True},
@@ -313,6 +328,32 @@ def send_management_card(user_id, request_time, expire_time_str):
                             "tag": "column",
                             "width": "auto",
                             "elements": [{"tag": "person", "size": "medium", "user_id": user_id, "margin": "0px 0px 0px 0px"}],
+                            "vertical_align": "top"
+                        }
+                    ],
+                    "margin": "0px 0px 0px 0px"
+                },
+                {
+                    "tag": "column_set",
+                    "horizontal_spacing": "8px",
+                    "horizontal_align": "left",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "115px",
+                            "elements": [{"tag": "markdown", "content": "获取密钥：", "text_align": "left", "text_size": "heading", "margin": "0px 0px 0px 0px"}],
+                            "padding": "0px 0px 0px 0px",
+                            "direction": "vertical",
+                            "horizontal_spacing": "8px",
+                            "vertical_spacing": "8px",
+                            "horizontal_align": "left",
+                            "vertical_align": "top",
+                            "margin": "0px 0px 0px 0px"
+                        },
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [{"tag": "markdown", "content": key_display, "text_align": "left", "text_size": "normal", "margin": "2px 0px 0px 0px"}],
                             "vertical_align": "top"
                         }
                     ],
@@ -384,12 +425,22 @@ def send_management_card(user_id, request_time, expire_time_str):
     requests.post(MANAGEMENT_WEBHOOK, json=payload, timeout=5)
 
 # ==================== OTP 生成 ====================
-def generate_otp():
-    totp = pyotp.TOTP(os.environ.get("TOTP_SECRET", ""))
+def generate_otp(key_name=None):
+    """生成 OTP 动态验证码，支持指定密钥名称查找 {key_name}_TOTP_SECRET 环境变量"""
+    if key_name:
+        env_key = f"{key_name}_TOTP_SECRET"
+        secret = os.environ.get(env_key, "")
+    else:
+        secret = os.environ.get("TOTP_SECRET", "")
+
+    if not secret:
+        return None, None, key_name
+
+    totp = pyotp.TOTP(secret)
     code = totp.now()
     remaining = totp.interval - (time.time() % totp.interval)
     expire_ts = int(time.time() + remaining)
-    return code, expire_ts
+    return code, expire_ts, key_name
 
 # ==================== AES 解密 ====================
 class AESCipher:
@@ -587,29 +638,46 @@ class handler(BaseHTTPRequestHandler):
                 print("[ERROR] 无法获取用户ID")
                 return
 
-            # 检测是否包含关键词
-            if re.search(r'(OTP|密钥|验证码|动态码)', text, re.IGNORECASE):
-                code, expire_ts = generate_otp()
+            # 解析多密钥格式: xxxOTP / xxx验证码 / xxx密钥 / xxx动态码
+            key_prefix = self._parse_otp_key(text)
+            if key_prefix is not None:
+                key_name = chinese_to_pinyin(key_prefix) if key_prefix else None
+                code, expire_ts, key_name = generate_otp(key_name)
+                if code is None:
+                    send_text_message(user_id, "该动态验证码不存在，请检查")
+                    return
+
                 expire_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expire_ts))
                 remaining_seconds = max(1, int(expire_ts - time.time()))
 
-                message_id = send_otp_card(user_id, code, remaining_seconds, user_id)
-                self._schedule_expiry_update(message_id, remaining_seconds, user_id)
+                message_id = send_otp_card(user_id, code, remaining_seconds, user_id, key_name)
+                self._schedule_expiry_update(message_id, remaining_seconds, user_id, key_name)
 
                 request_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-                send_management_card(user_id, request_time_str, expire_time_str)
+                send_management_card(user_id, request_time_str, expire_time_str, key_name)
             else:
                 send_help(user_id)
 
         except Exception as e:
             print(f"处理消息事件出错: {e}")
 
-    def _schedule_expiry_update(self, message_id, delay_seconds, user_id):
+    def _parse_otp_key(self, text):
+        """解析OTP请求文本，返回密钥前缀或空字符串(默认密钥)，非OTP请求返回None"""
+        text = text.strip()
+        m = re.match(r'^(.+?)\s*(OTP|验证码|密钥|动态码)$', text, re.IGNORECASE)
+        if m:
+            prefix = m.group(1).strip()
+            return prefix if prefix else ""
+        if re.match(r'^(OTP|验证码|密钥|动态码)$', text, re.IGNORECASE):
+            return ""
+        return None
+
+    def _schedule_expiry_update(self, message_id, delay_seconds, user_id, key_name=None):
         """启动异步线程，延迟更新 OTP 卡片状态为已过期"""
         def _update_expired():
             time.sleep(delay_seconds)
             try:
-                update_otp_card(message_id, user_id)
+                update_otp_card(message_id, user_id, key_name)
                 print(f"[INFO] OTP 卡片 {message_id} 已过期，状态已更新")
             except Exception as err:
                 print(f"[ERROR] 更新 OTP 卡片失败: {err}")
