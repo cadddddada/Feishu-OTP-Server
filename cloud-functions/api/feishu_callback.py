@@ -385,7 +385,7 @@ def send_management_card(user_id, request_time, expire_time_str):
 
 # ==================== OTP 生成 ====================
 def generate_otp():
-    totp = pyotp.TOTP(TOTP_SECRET)
+    totp = pyotp.TOTP(os.environ.get("TOTP_SECRET", ""))
     code = totp.now()
     remaining = totp.interval - (time.time() % totp.interval)
     expire_ts = int(time.time() + remaining)
