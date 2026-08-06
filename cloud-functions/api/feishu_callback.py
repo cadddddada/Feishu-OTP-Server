@@ -593,14 +593,17 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             # 任务处理完成后再返回 200（不使用多线程）
-            print("[DEBUG] 开始处理业务逻辑")
-            self._handle_event(event_data)
-            print("[DEBUG] 业务逻辑处理完成，返回 200")
+            # print("[DEBUG] 开始处理业务逻辑")
+            # self._handle_event(event_data)
+            # print("[DEBUG] 业务逻辑处理完成，返回 200")
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({"code": 0, "msg": "success"}).encode('utf-8'))
+            print("[DEBUG] 已返回 200，启动异步事件处理")
+
+            threading.Thread(target=self._handle_event, args=(event_data,), daemon=True).start()
 
         except Exception as e:
             print(f"[ERROR] 处理请求异常: {e}")
