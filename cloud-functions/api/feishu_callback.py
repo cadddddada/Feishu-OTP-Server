@@ -42,9 +42,9 @@ def kv_get(key, default=None):
     if not proxy_url:
         return default
     try:
-        print(f"[KV] get: {key} (via proxy)")
-        resp = requests.get(proxy_url, params={"key": key},
-                            headers={"X-KV-Proxy-Token": KV_PROXY_TOKEN}, timeout=10)
+        url = f"{proxy_url}?key={key}"
+        print(f"[KV] get: {key} -> GET {url} (token_set={bool(KV_PROXY_TOKEN)})")
+        resp = requests.get(url, headers={"X-KV-Proxy-Token": KV_PROXY_TOKEN}, timeout=10)
         if resp.status_code == 404:
             print(f"[KV] get: {key} 不存在")
             return default
@@ -68,7 +68,7 @@ def kv_put(key, value, ttl=None):
     if not proxy_url:
         return
     try:
-        print(f"[KV] put: {key} (via proxy)")
+        print(f"[KV] put: {key} -> PUT {proxy_url} (token_set={bool(KV_PROXY_TOKEN)})")
         resp = requests.put(proxy_url, json={"key": key, "value": json.dumps(value)},
                             headers={"X-KV-Proxy-Token": KV_PROXY_TOKEN}, timeout=10)
         if resp.status_code != 200:
@@ -82,8 +82,9 @@ def kv_delete(key):
     if not proxy_url:
         return
     try:
-        print(f"[KV] delete: {key} (via proxy)")
-        resp = requests.delete(proxy_url, params={"key": key},
+        url = f"{proxy_url}?key={key}"
+        print(f"[KV] delete: {key} -> DELETE {url} (token_set={bool(KV_PROXY_TOKEN)})")
+        resp = requests.delete(url,
                                headers={"X-KV-Proxy-Token": KV_PROXY_TOKEN}, timeout=10)
         if resp.status_code != 200:
             print(f"[KV] delete error: HTTP {resp.status_code}")
