@@ -19,7 +19,7 @@ ENCRYPT_KEY = os.environ.get("FEISHU_ENCRYPT_KEY", "")
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 MANAGEMENT_WEBHOOK = os.environ.get("MANAGEMENT_WEBHOOK", "")
-KV_NAMESPACE = os.environ.get("KV_NAMESPACE", "TOTP_SERVER")
+# KV_NAMESPACE = os.environ.get("KV_NAMESPACE", "TOTP_SERVER")
 
 # try:
 #     from edgeone import kv as edgeone_kv
