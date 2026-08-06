@@ -32,9 +32,10 @@ feishu-otp-server/
 
 This is the main entry file of the project, containing the following core components:
 
-#### KV Storage Operations
+#### KV Storage Operations (via Edge Function KV proxy)
+Python Cloud Functions cannot access KV directly. These operations call the Edge Function proxy (`/api/kv`) over HTTP in real time, without caching:
 - `kv_get(key, default=None)`: Get key value
-- `kv_put(key, value, ttl=None)`: Store key value (supports expiration time)
+- `kv_put(key, value, ttl=None)`: Store key value (TTL is not supported by the proxy yet)
 - `kv_delete(key)`: Delete key value
 
 #### OTP Related Functions
@@ -74,15 +75,22 @@ FEISHU_VERIFICATION_TOKEN=your_verification_token
 FEISHU_ENCRYPT_KEY=your_encrypt_key
 MANAGEMENT_WEBHOOK=your_administrator_group_webhook
 KV_NAMESPACE=TOTP_SERVER
+# KV_PROXY_URL is optional; when empty, it is derived from the callback request host as https://{Host}/api/kv
+KV_PROXY_TOKEN=your_custom_token_matching_the_edge_function
 ```
 
-4. Add the OTP secrets to the KV namespace `TOTP_SERVER` (secrets are not cached; they are read from KV every time a dynamic code is generated):
+4. Deploy the KV proxy Edge Function (`edge-functions/api/kv/index.js`, route `/api/kv`):
+   - The Edge Function accesses KV through the bound `KV_NAMESPACE` (namespace `TOTP_SERVER`)
+   - Configure the `KV_PROXY_TOKEN` environment variable with the same value for both the Edge Function and the Python Cloud Function
+   - The proxy URL is derived automatically by the Python Cloud Function from the `Host` header of each callback request (`https://{Host}/api/kv`), so no domain configuration is needed
+
+5. Add the OTP secrets to the KV namespace `TOTP_SERVER` (secrets are not cached; they are read from KV every time a dynamic code is generated):
    - Default secret: key `TOTP_SECRET`, value is the base32 TOTP secret
    - Named secrets: key `{UPPERCASE_PINYIN}_TOTP_SECRET`, e.g. when a user sends "阿里云OTP" the code reads `ALIYUN_TOTP_SECRET`
 
-5. Configure the domain and other basic information for the Maker container
+6. Configure the domain and other basic information for the Maker container
 
-6. Fill in the callback URL `https://[your-domain]/api/feishu_callback` as the event request URL, and select the connection mode "Send events to developer server"
+7. Fill in the callback URL `https://[your-domain]/api/feishu_callback` as the event request URL, and select the connection mode "Send events to developer server"
 
 ## Contact
 

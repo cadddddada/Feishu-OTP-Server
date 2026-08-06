@@ -3,6 +3,7 @@ import json
 import base64
 import hashlib
 import hmac
+import contextvars
 import threading
 import time
 import os
@@ -19,21 +20,38 @@ ENCRYPT_KEY = os.environ.get("FEISHU_ENCRYPT_KEY", "")
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 MANAGEMENT_WEBHOOK = os.environ.get("MANAGEMENT_WEBHOOK", "")
-# KV_NAMESPACE = os.environ.get("KV_NAMESPACE", "TOTP_SERVER")
+# KV 代理（Edge Function）：Python 云函数不支持直接访问 KV，通过 HTTP 调用代理读写
+# 代理地址默认从本次回调请求的域名推导（https://{Host}/api/kv），KV_PROXY_URL 仅作为兜底
+KV_PROXY_URL = os.environ.get("KV_PROXY_URL", "")
+KV_PROXY_TOKEN = os.environ.get("KV_PROXY_TOKEN", "")
 
-# try:
-#     from edgeone import kv as edgeone_kv
-#     kv = edgeone_kv
-# except ImportError:
-#     kv = None
-#     print("[WARN] EdgeOne KV not available, using mock")
+# 请求作用域内的 KV 代理来源（由 do_POST 从请求头读取后设置）
+_request_origin = contextvars.ContextVar("kv_proxy_origin", default="")
 
-# KV 操作（同上，省略重复）
+def _kv_proxy_url():
+    """KV 代理地址：优先使用当前请求推导出的域名，否则使用 KV_PROXY_URL 兜底"""
+    origin = _request_origin.get().strip()
+    if origin:
+        return f"{origin}/api/kv"
+    return KV_PROXY_URL
+
+# KV 操作（通过 Edge Function KV 代理，每次实时读写，不缓存）
 def kv_get(key, default=None):
-    # if kv is None:
-    #     return default
+    """读取 KV 值；优先按 JSON 解析，无法解析时按原始字符串返回"""
+    proxy_url = _kv_proxy_url()
+    if not proxy_url:
+        return default
     try:
-        raw = KV_NAMESPACE.get(key)
+        print(f"[KV] get: {key} (via proxy)")
+        resp = requests.get(proxy_url, params={"key": key},
+                            headers={"X-KV-Proxy-Token": KV_PROXY_TOKEN}, timeout=10)
+        if resp.status_code == 404:
+            print(f"[KV] get: {key} 不存在")
+            return default
+        if resp.status_code != 200:
+            print(f"[KV] get error: HTTP {resp.status_code}")
+            return default
+        raw = resp.text
         if not raw:
             return default
         try:
@@ -45,18 +63,30 @@ def kv_get(key, default=None):
         return default
 
 def kv_put(key, value, ttl=None):
-    # if kv is None:
-    #     return
+    """写入 KV 值（代理不支持 TTL，ttl 参数仅保留兼容）"""
+    proxy_url = _kv_proxy_url()
+    if not proxy_url:
+        return
     try:
-        KV_NAMESPACE.put(key, json.dumps(value), expiration_ttl=ttl)
+        print(f"[KV] put: {key} (via proxy)")
+        resp = requests.put(proxy_url, json={"key": key, "value": json.dumps(value)},
+                            headers={"X-KV-Proxy-Token": KV_PROXY_TOKEN}, timeout=10)
+        if resp.status_code != 200:
+            print(f"[KV] put error: HTTP {resp.status_code}")
     except Exception as e:
         print(f"KV put error: {e}")
 
 def kv_delete(key):
-    # if kv is None:
-    #     return
+    """删除 KV 值"""
+    proxy_url = _kv_proxy_url()
+    if not proxy_url:
+        return
     try:
-        KV_NAMESPACE.delete(key)
+        print(f"[KV] delete: {key} (via proxy)")
+        resp = requests.delete(proxy_url, params={"key": key},
+                               headers={"X-KV-Proxy-Token": KV_PROXY_TOKEN}, timeout=10)
+        if resp.status_code != 200:
+            print(f"[KV] delete error: HTTP {resp.status_code}")
     except Exception as e:
         print(f"KV delete error: {e}")
 
@@ -483,6 +513,15 @@ class handler(BaseHTTPRequestHandler):
         print(f"[DEBUG] 请求路径: {self.path}")
         print(f"[DEBUG] 请求头: {dict(self.headers)}")
 
+        # 从本次获取 OTP 的回调请求中读取域名，用于 KV 代理地址（https://{Host}/api/kv）
+        proto = (self.headers.get('X-Forwarded-Proto') or 'https').strip().rstrip(':')
+        host = (self.headers.get('Host') or '').strip()
+        if host:
+            _request_origin.set(f"{proto}://{host}")
+            print(f"[DEBUG] KV 代理域名（来自请求）: {proto}://{host}")
+        else:
+            print("[DEBUG] 请求中未取到 Host，KV 代理将使用 KV_PROXY_URL 兜底")
+
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length).decode('utf-8')
@@ -560,9 +599,6 @@ class handler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({"code": 0, "msg": "success"}).encode('utf-8'))
-            # print("[DEBUG] 已返回 200，启动异步事件处理")
-
-            # threading.Thread(target=self._handle_event, args=(event_data,), daemon=True).start()
 
         except Exception as e:
             print(f"[ERROR] 处理请求异常: {e}")
