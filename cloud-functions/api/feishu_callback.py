@@ -63,13 +63,14 @@ def kv_get(key, default=None):
         return default
 
 def kv_put(key, value, ttl=None):
-    """写入 KV 值（代理不支持 TTL，ttl 参数仅保留兼容）"""
+    """写入 KV 值（代理不支持 TTL，ttl 参数仅保留兼容）；字符串原样存储，其他类型 JSON 序列化"""
     proxy_url = _kv_proxy_url()
     if not proxy_url:
         return
     try:
+        value_str = value if isinstance(value, str) else json.dumps(value)
         print(f"[KV] put: {key} -> PUT {proxy_url} (token_set={bool(KV_PROXY_TOKEN)})")
-        resp = requests.put(proxy_url, json={"key": key, "value": json.dumps(value)},
+        resp = requests.put(proxy_url, json={"key": key, "value": value_str},
                             headers={"X-KV-Proxy-Token": KV_PROXY_TOKEN}, timeout=10)
         if resp.status_code != 200:
             print(f"[KV] put error: HTTP {resp.status_code}")
@@ -130,7 +131,7 @@ def send_text_message(receive_id, text_content):
     requests.post(url, headers=headers, json=payload, timeout=10)
 
 def send_help(receive_id):
-    send_text_message(receive_id, "发送\u201CxxxOTP\u201D或\u201Cxxx验证码\u201D获取动态密码，例如\u201C阿里云OTP\u201D。")
+    send_text_message(receive_id, "发送\u201CxxxOTP\u201D或\u201Cxxx验证码\u201D获取动态密码，例如\u201C阿里云OTP\u201D。\n添加/更新密钥：私聊发送\u201C添加密钥 XXX <密钥>\u201D，例如\u201C添加密钥 阿里云 JBSWY3DPEHPK3PXP\u201D。")
 
 def send_otp_card(receive_id, code, remaining_seconds, user_id, key_name=None):
     token = get_tenant_access_token()
@@ -603,7 +604,9 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"code": 0, "msg": "success"}).encode('utf-8'))
             print("[DEBUG] 已返回 200，启动异步事件处理")
 
-            threading.Thread(target=self._handle_event, args=(event_data,), daemon=True).start()
+            # 将当前请求上下文（含 KV 代理域名）复制给后台线程
+            ctx = contextvars.copy_context()
+            threading.Thread(target=lambda: ctx.run(self._handle_event, event_data), daemon=True).start()
 
         except Exception as e:
             print(f"[ERROR] 处理请求异常: {e}")
@@ -688,6 +691,12 @@ class handler(BaseHTTPRequestHandler):
                 print("[ERROR] 无法获取用户ID")
                 return
 
+            chat_type = message.get('chat_type', '')
+
+            # 添加/更新 TOTP 密钥：添加密钥 XXX <密钥>（仅私聊）
+            if self._handle_add_secret(text, user_id, chat_type):
+                return
+
             # 解析多密钥格式: xxxOTP / xxx验证码 / xxx密钥 / xxx动态码
             key_prefix = self._parse_otp_key(text)
             if key_prefix is not None:
@@ -711,6 +720,33 @@ class handler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"处理消息事件出错: {e}")
 
+    def _handle_add_secret(self, text, user_id, chat_type=''):
+        """处理添加/更新 TOTP 密钥请求：添加密钥 XXX <密钥>（仅私聊）"""
+        text = text.strip()
+        if not text.startswith('添加密钥'):
+            return False
+        if chat_type and chat_type != 'p2p':
+            send_text_message(user_id, "添加密钥仅支持在私聊中使用。")
+            return True
+        if text == '添加密钥' or re.match(r'^添加密钥\s+\S+\s*$', text):
+            send_text_message(user_id, "格式：添加密钥 XXX <密钥>，例如：添加密钥 阿里云 JBSWY3DPEHPK3PXP")
+            return True
+        m = re.match(r'^添加密钥\s+(\S+)\s+(\S+)\s*$', text)
+        if not m:
+            return False
+        key_prefix, secret = m.group(1), m.group(2)
+        key_name = chinese_to_pinyin(key_prefix)
+        kv_key = f"{key_name}_TOTP_SECRET"
+        # 校验 base32 密钥格式
+        try:
+            pyotp.TOTP(secret).now()
+        except Exception:
+            send_text_message(user_id, "密钥格式无效（需要 base32 格式），请检查后重试。示例：添加密钥 阿里云 JBSWY3DPEHPK3PXP")
+            return True
+        kv_put(kv_key, secret)
+        send_text_message(user_id, f"已添加/更新密钥 {key_prefix}（存储键：{kv_key}）。发送\u201C{key_prefix}OTP\u201D即可获取动态密码。")
+        return True
+
     def _parse_otp_key(self, text):
         """解析OTP请求文本，返回密钥前缀或空字符串(默认密钥)，非OTP请求返回None"""
         text = text.strip()
@@ -732,7 +768,9 @@ class handler(BaseHTTPRequestHandler):
             except Exception as err:
                 print(f"[ERROR] 更新 OTP 卡片失败: {err}")
 
-        t = threading.Thread(target=_update_expired, daemon=True)
+        # 复制当前请求上下文（含 KV 代理域名）给过期更新线程
+        ctx = contextvars.copy_context()
+        t = threading.Thread(target=lambda: ctx.run(_update_expired), daemon=True)
         t.start()
 
     def _send_error(self, code, message):

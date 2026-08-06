@@ -9,6 +9,7 @@ This project is an OTP (One-Time Password) server built with EdgeOne Maker. It g
 ## Key Features
 
 - **OTP Generation and Verification**: Generates secure one-time passwords and sends them via Feishu
+- **Self-service key management**: Send "添加密钥 XXX <secret>" in a private chat to add/update a key in KV, e.g. "添加密钥 阿里云 JBSWY3DPEHPK3PXP"
 - **Feishu Message Cards**: Displays OTP and related information using interactive cards
 - **Event Handling**: Supports event callbacks and message processing from the Feishu platform
 
