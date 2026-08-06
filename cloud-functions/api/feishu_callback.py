@@ -21,19 +21,19 @@ APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 MANAGEMENT_WEBHOOK = os.environ.get("MANAGEMENT_WEBHOOK", "")
 KV_NAMESPACE = os.environ.get("KV_NAMESPACE", "TOTP_SERVER")
 
-try:
-    from edgeone import kv as edgeone_kv
-    kv = edgeone_kv
-except ImportError:
-    kv = None
-    print("[WARN] EdgeOne KV not available, using mock")
+# try:
+#     from edgeone import kv as edgeone_kv
+#     kv = edgeone_kv
+# except ImportError:
+#     kv = None
+#     print("[WARN] EdgeOne KV not available, using mock")
 
 # KV 操作（同上，省略重复）
 def kv_get(key, default=None):
-    if kv is None:
-        return default
+    # if kv is None:
+    #     return default
     try:
-        raw = kv.get(key)
+        raw = KV_NAMESPACE.get(key)
         if not raw:
             return default
         try:
@@ -45,18 +45,18 @@ def kv_get(key, default=None):
         return default
 
 def kv_put(key, value, ttl=None):
-    if kv is None:
-        return
+    # if kv is None:
+    #     return
     try:
-        kv.put(key, json.dumps(value), expiration_ttl=ttl)
+        KV_NAMESPACE.put(key, json.dumps(value), expiration_ttl=ttl)
     except Exception as e:
         print(f"KV put error: {e}")
 
 def kv_delete(key):
-    if kv is None:
-        return
+    # if kv is None:
+    #     return
     try:
-        kv.delete(key)
+        KV_NAMESPACE.delete(key)
     except Exception as e:
         print(f"KV delete error: {e}")
 
