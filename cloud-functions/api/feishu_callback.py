@@ -16,11 +16,10 @@ from pypinyin import pinyin, Style
 # ==================== 配置 ====================
 VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN", "")
 ENCRYPT_KEY = os.environ.get("FEISHU_ENCRYPT_KEY", "")
-TOTP_SECRET = os.environ.get("TOTP_SECRET", "")
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 MANAGEMENT_WEBHOOK = os.environ.get("MANAGEMENT_WEBHOOK", "")
-KV_NAMESPACE = os.environ.get("KV_NAMESPACE", "OTP_KV")
+KV_NAMESPACE = os.environ.get("KV_NAMESPACE", "TOTP_SERVER")
 
 try:
     from edgeone import kv as edgeone_kv
@@ -35,7 +34,12 @@ def kv_get(key, default=None):
         return default
     try:
         raw = kv.get(key)
-        return json.loads(raw) if raw else default
+        if not raw:
+            return default
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return raw
     except Exception as e:
         print(f"KV get error: {e}")
         return default
@@ -426,12 +430,13 @@ def send_management_card(user_id, request_time, expire_time_str, key_name=None):
 
 # ==================== OTP 生成 ====================
 def generate_otp(key_name=None):
-    """生成 OTP 动态验证码，支持指定密钥名称查找 {key_name}_TOTP_SECRET 环境变量"""
-    if key_name:
-        env_key = f"{key_name}_TOTP_SECRET"
-        secret = os.environ.get(env_key, "")
-    else:
-        secret = os.environ.get("TOTP_SECRET", "")
+    """生成 OTP 动态验证码，支持指定密钥名称查找。
+    密钥不缓存，每次调用都从 KV 存储读取：
+    - 默认密钥：TOTP_SECRET
+    - 具名密钥：{key_name}_TOTP_SECRET（key_name 为大写拼音）
+    """
+    kv_key = f"{key_name}_TOTP_SECRET" if key_name else "TOTP_SECRET"
+    secret = kv_get(kv_key, "")
 
     if not secret:
         return None, None, key_name

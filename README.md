@@ -69,20 +69,23 @@ feishu-otp-server/
 - 配置事件与回调
  - 加密策略中配置`Encrypt Key`与`Verification Token`
 
-3. 在EdgeOne Makers中配置环境变量：
+3. 在EdgeOne Makers中配置环境变量，并绑定 KV 命名空间：
 ```env
 APP_ID=your_app_id
 APP_SECRET=your_app_secret
 FEISHU_VERIFICATION_TOKEN=your_verification_token
 FEISHU_ENCRYPT_KEY=your_encrypt_key
-TOTP_SECRET=your_totp_key
 MANAGEMENT_WEBHOOK=your_administrator_group_webhook
-KV_NAMESPACE=your_kv_namespace
+KV_NAMESPACE=TOTP_SERVER
 ```
 
-4. 配置Makers容器的域名等基础信息
+4. 在 KV 命名空间 `TOTP_SERVER` 中添加 OTP 密钥（密钥不缓存，每次生成动态验证码时都会从 KV 读取）：
+ - 默认密钥：键名 `TOTP_SECRET`，值为 base32 格式的 TOTP 密钥
+ - 具名密钥：键名 `{大写拼音}_TOTP_SECRET`，例如用户发送“阿里云OTP”时读取 `ALIYUN_TOTP_SECRET`
 
-5. 将回调地址`https://[你的域名]/api/feishu_callback`填入事件请求地址，连接模式选择 将事件发送至开发者服务器
+5. 配置Makers容器的域名等基础信息
+
+6. 将回调地址`https://[你的域名]/api/feishu_callback`填入事件请求地址，连接模式选择 将事件发送至开发者服务器
 
 ## 联系方式
 

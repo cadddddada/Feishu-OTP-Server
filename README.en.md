@@ -66,20 +66,23 @@ This is the main entry file of the project, containing the following core compon
    - Configure events and callbacks
    - Configure `Encrypt Key` and `Verification Token` in the encryption settings
 
-3. Configure environment variables in EdgeOne Maker:
+3. Configure environment variables in EdgeOne Maker and bind the KV namespace:
 ```env
 APP_ID=your_app_id
 APP_SECRET=your_app_secret
 FEISHU_VERIFICATION_TOKEN=your_verification_token
 FEISHU_ENCRYPT_KEY=your_encrypt_key
-TOTP_SECRET=your_totp_key
 MANAGEMENT_WEBHOOK=your_administrator_group_webhook
-KV_NAMESPACE=your_kv_namespace
+KV_NAMESPACE=TOTP_SERVER
 ```
 
-4. Configure the domain and other basic information for the Maker container
+4. Add the OTP secrets to the KV namespace `TOTP_SERVER` (secrets are not cached; they are read from KV every time a dynamic code is generated):
+   - Default secret: key `TOTP_SECRET`, value is the base32 TOTP secret
+   - Named secrets: key `{UPPERCASE_PINYIN}_TOTP_SECRET`, e.g. when a user sends "阿里云OTP" the code reads `ALIYUN_TOTP_SECRET`
 
-5. Fill in the callback URL `https://[your-domain]/api/feishu_callback` as the event request URL, and select the connection mode "Send events to developer server"
+5. Configure the domain and other basic information for the Maker container
+
+6. Fill in the callback URL `https://[your-domain]/api/feishu_callback` as the event request URL, and select the connection mode "Send events to developer server"
 
 ## Contact
 
