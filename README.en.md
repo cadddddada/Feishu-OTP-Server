@@ -75,14 +75,14 @@ FEISHU_VERIFICATION_TOKEN=your_verification_token
 FEISHU_ENCRYPT_KEY=your_encrypt_key
 MANAGEMENT_WEBHOOK=your_administrator_group_webhook
 KV_NAMESPACE=TOTP_SERVER
-# KV_PROXY_URL is optional; when empty, it is derived from the callback request host as https://{Host}/api/kv
+# KV_PROXY_URL is optional; when empty, it is derived from the callback request's Eo-Pages-Host header as https://{host}/api/kv
 KV_PROXY_TOKEN=your_custom_token_matching_the_edge_function
 ```
 
 4. Deploy the KV proxy Edge Function (`edge-functions/api/kv/index.js`, route `/api/kv`):
    - The Edge Function accesses KV through the bound `KV_NAMESPACE` (namespace `TOTP_SERVER`)
    - Configure the `KV_PROXY_TOKEN` environment variable with the same value for both the Edge Function and the Python Cloud Function
-   - The proxy URL is derived automatically by the Python Cloud Function from the `Host` header of each callback request (`https://{Host}/api/kv`), so no domain configuration is needed
+   - The proxy URL is derived automatically by the Python Cloud Function from the `Eo-Pages-Host` header of each callback request (`https://{host}/api/kv`), so no domain configuration is needed
 
 5. Add the OTP secrets to the KV namespace `TOTP_SERVER` (secrets are not cached; they are read from KV every time a dynamic code is generated):
    - Default secret: key `TOTP_SECRET`, value is the base32 TOTP secret

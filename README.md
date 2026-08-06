@@ -78,14 +78,14 @@ FEISHU_VERIFICATION_TOKEN=your_verification_token
 FEISHU_ENCRYPT_KEY=your_encrypt_key
 MANAGEMENT_WEBHOOK=your_administrator_group_webhook
 KV_NAMESPACE=TOTP_SERVER
-# KV_PROXY_URL 可选，留空时自动从回调请求的域名推导出 https://{Host}/api/kv
+# KV_PROXY_URL 可选，留空时自动从回调请求的 Eo-Pages-Host 头推导出 https://{域名}/api/kv
 KV_PROXY_TOKEN=与边缘函数一致的自定义令牌
 ```
 
 4. 部署 KV 代理 Edge Function（`edge-functions/api/kv/index.js`，路由 `/api/kv`）：
  - Edge Function 通过绑定的 `KV_NAMESPACE`（命名空间 `TOTP_SERVER`）读写 KV
  - 在项目中配置环境变量 `KV_PROXY_TOKEN`，边缘函数与 Python 云函数使用同一个值
- - 代理地址由 Python 云函数从每次回调请求的 `Host` 头自动推导（`https://{Host}/api/kv`），无需手动配置域名
+ - 代理地址由 Python 云函数从每次回调请求的 `Eo-Pages-Host` 头自动推导（`https://{域名}/api/kv`），无需手动配置域名
 
 5. 在 KV 命名空间 `TOTP_SERVER` 中添加 OTP 密钥（密钥不缓存，每次生成动态验证码时都会从 KV 读取）：
  - 默认密钥：键名 `TOTP_SECRET`，值为 base32 格式的 TOTP 密钥

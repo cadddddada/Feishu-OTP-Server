@@ -514,14 +514,15 @@ class handler(BaseHTTPRequestHandler):
         print(f"[DEBUG] 请求路径: {self.path}")
         print(f"[DEBUG] 请求头: {dict(self.headers)}")
 
-        # 从本次获取 OTP 的回调请求中读取域名，用于 KV 代理地址（https://{Host}/api/kv）
+        # 从本次获取 OTP 的回调请求中读取域名，用于 KV 代理地址（https://{域名}/api/kv）
+        # 注意：Host 头是平台内部 SCF 域名，真实用户域名在 Eo-Pages-Host 头中
         proto = (self.headers.get('X-Forwarded-Proto') or 'https').strip().rstrip(':')
-        host = (self.headers.get('Host') or '').strip()
+        host = (self.headers.get('Eo-Pages-Host') or self.headers.get('Host') or '').strip()
         if host:
             _request_origin.set(f"{proto}://{host}")
-            print(f"[DEBUG] KV 代理域名（来自请求）: {proto}://{host}")
+            print(f"[DEBUG] KV 代理域名（来自请求 Eo-Pages-Host）: {proto}://{host}")
         else:
-            print("[DEBUG] 请求中未取到 Host，KV 代理将使用 KV_PROXY_URL 兜底")
+            print("[DEBUG] 请求中未取到域名，KV 代理将使用 KV_PROXY_URL 兜底")
 
         try:
             content_length = int(self.headers.get('Content-Length', 0))
