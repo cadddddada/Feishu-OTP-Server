@@ -4,4 +4,7 @@
 .env
 .edgeone/*
 .tef_dist/*
+node_modules/
+.venv/
+__pycache__/
   
