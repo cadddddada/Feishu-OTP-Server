@@ -51,6 +51,50 @@ export async function verifyPayload(payload, signature, secret, maxAgeMs = 60000
   return safeEqual(expected, String(signature || ""));
 }
 
+// ---------- 敏感内容加密（AES-256-GCM，密钥由 EDGE_SYNC_SECRET 派生） ----------
+// 传输协议：{ envelope, signature }；envelope = { iv, data, createdAt }
+//   - data = base64(密文 || GCM 认证标签)，iv 为 12 字节随机数
+//   - signature = HMAC-SHA256(canonicalJson(envelope))，同时承担时效校验（createdAt）
+function bytesToBase64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+async function deriveGcmKey(secret) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
+  return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, [
+    "encrypt",
+    "decrypt",
+  ]);
+}
+
+export async function encryptPayload(payload, secret) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveGcmKey(secret);
+  const data = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    new TextEncoder().encode(JSON.stringify(payload))
+  );
+  return { iv: bytesToBase64(iv), data: bytesToBase64(new Uint8Array(data)), createdAt: Date.now() };
+}
+
+export async function decryptPayload(envelope, secret) {
+  const key = await deriveGcmKey(secret);
+  const iv = base64ToBytes(envelope.iv);
+  const data = base64ToBytes(envelope.data);
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
 // ---------- base32 / TOTP（Web Crypto，等价 pyotp 默认参数） ----------
 const B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -102,10 +146,12 @@ export async function totp(secret, unixTime = Math.floor(Date.now() / 1000)) {
 export async function generateNewOtp(keyName = null) {
   const kvKey = keyName ? `${keyName}_TOTP_SECRET` : "TOTP_SECRET";
   const secret = await kvGet(kvKey, "");
-  if (!secret) return { code: null, remaining: null, expireTs: null, keyName };
+  if (!secret) return { code: null, remaining: null, expireTs: null, nextCode: null, keyName };
   const now = Math.floor(Date.now() / 1000);
   const { code, remaining, expireTs } = await totp(secret, now);
-  return { code, remaining, expireTs, keyName };
+  // 预生成下一窗口的 OTP（确定性：与到期时再算结果一致）
+  const { code: nextCode } = await totp(secret, expireTs);
+  return { code, remaining, expireTs, nextCode, keyName };
 }
 
 // ---------- 地址前缀解析 ----------
@@ -195,12 +241,12 @@ export async function getTenantAccessToken(env) {
   const now = Math.floor(Date.now() / 1000);
   // 实例内缓存命中：避免每次请求都读一次 KV
   if (_memToken && now < _memToken.expireAt - 300) {
-    return _memToken.token;
+    return _memToken;
   }
   const cached = await kvGet("tenant_access_token");
   if (cached && now < (cached.expire_at || 0) - 300) {
     _memToken = { token: cached.token, expireAt: cached.expire_at };
-    return cached.token;
+    return _memToken;
   }
   const resp = await fetch(
     "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
@@ -219,124 +265,7 @@ export async function getTenantAccessToken(env) {
   const expireAt = now + (data.expire || 7200);
   _memToken = { token, expireAt };
   await kvPut("tenant_access_token", { token, expire_at: expireAt });
-  return token;
-}
-
-// ---------- 已失效卡片与过期更新（由 Edge 调用飞书） ----------
-export function buildExpiredCard(userId, keyName) {
-  return {
-    schema: "2.0",
-    config: { update_multi: true },
-    body: {
-      direction: "vertical",
-      elements: [
-        {
-          tag: "column_set",
-          flex_mode: "stretch",
-          horizontal_spacing: "8px",
-          horizontal_align: "left",
-          columns: [
-            {
-              tag: "column",
-              width: "weighted",
-              background_style: "blue-50",
-              elements: [
-                {
-                  tag: "markdown",
-                  content: "## <font color='orange'>******</font>",
-                  text_align: "center",
-                },
-              ],
-              padding: "16px 0px 16px 0px",
-              vertical_spacing: "2px",
-              horizontal_align: "left",
-              vertical_align: "top",
-              weight: 1,
-            },
-          ],
-          margin: "0px 0px 0px 0px",
-        },
-        {
-          tag: "markdown",
-          content: "**<font color='orange'>剩余时间：已过期</font>**",
-          text_align: "center",
-          text_size: "normal",
-          margin: "0px 0px 0px 0px",
-          element_id: "remaining_time",
-        },
-        {
-          tag: "column_set",
-          horizontal_spacing: "8px",
-          horizontal_align: "left",
-          columns: [
-            {
-              tag: "column",
-              width: "auto",
-              elements: [
-                {
-                  tag: "markdown",
-                  content: "数据获取人：",
-                  text_align: "left",
-                  text_size: "heading",
-                  margin: "3px 0px 0px 0px",
-                },
-              ],
-              padding: "0px 0px 0px 0px",
-              direction: "vertical",
-              horizontal_spacing: "8px",
-              vertical_spacing: "8px",
-              horizontal_align: "left",
-              vertical_align: "top",
-              margin: "0px 0px 0px 0px",
-            },
-            {
-              tag: "column",
-              width: "auto",
-              elements: [
-                {
-                  tag: "person",
-                  size: "medium",
-                  user_id: userId,
-                  margin: "0px 0px 0px 0px",
-                },
-              ],
-              vertical_align: "top",
-            },
-          ],
-          margin: "0px 0px 0px 0px",
-        },
-      ],
-    },
-    header: {
-      title: {
-        tag: "plain_text",
-        content: keyName ? `${keyName} OTP动态密钥` : "OTP动态密钥",
-      },
-      subtitle: { tag: "plain_text", content: "" },
-      text_tag_list: [
-        {
-          tag: "text_tag",
-          text: { tag: "plain_text", content: "已失效" },
-          color: "red",
-        },
-      ],
-      template: "blue",
-      icon: { tag: "standard_icon", token: "lock" },
-      padding: "12px 8px 12px 8px",
-    },
-  };
-}
-
-export async function expireFeishuCard(env, messageId, userId, keyName) {
-  const token = await getTenantAccessToken(env);
-  const url = `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}`;
-  const resp = await fetch(url, {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ content: JSON.stringify(buildExpiredCard(userId, keyName)) }),
-  });
-  if (resp.status !== 200) throw new Error(`更新卡片失败: ${await resp.text()}`);
-  return resp.json();
+  return _memToken;
 }
 
 // ---------- OTP 卡片（有效期内） ----------
@@ -445,22 +374,6 @@ export function buildOtpCard(code, remainingSeconds, userId, keyName) {
 }
 
 // OTP 续期：重新生成当前窗口密钥并 PATCH 到用户卡片（由 Cloud 定时触发）
-export async function renewFeishuCard(env, messageId, userId, keyName) {
-  const { code, remaining, expireTs, keyName: resolvedName } = await generateNewOtp(keyName);
-  if (!code) throw new Error(`密钥不存在，无法续期: ${keyName || "默认"}`);
-  const token = await getTenantAccessToken(env);
-  const url = `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}`;
-  const resp = await fetch(url, {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      content: JSON.stringify(buildOtpCard(code, remaining, userId, resolvedName)),
-    }),
-  });
-  if (resp.status !== 200) throw new Error(`续期更新卡片失败: ${await resp.text()}`);
-  return resp.json();
-}
-
 // ---------- 统一响应 ----------
 export function json(data, status = 200, headers = {}) {
   const h = {

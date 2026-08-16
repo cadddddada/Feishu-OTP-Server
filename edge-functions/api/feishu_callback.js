@@ -16,6 +16,7 @@ import {pinyin} from "pinyin-pro";
 import {
     base32Decode,
     buildOtpCard,
+    encryptPayload,
     generateNewOtp,
     getTenantAccessToken,
     json,
@@ -37,7 +38,7 @@ function chineseToPinyin(text) {
 }
 
 async function sendTextMessage(env, receiveId, textContent) {
-    const token = await getTenantAccessToken(env);
+    const { token } = await getTenantAccessToken(env);
     const url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id";
     await fetch(url, {
         method: "POST",
@@ -141,7 +142,7 @@ function buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay) {
 }
 
 async function sendOtpCard(env, receiveId, code, remainingSeconds, userId, keyName = null, token = null) {
-    const bearer = token || (await getTenantAccessToken(env));
+    const bearer = token || (await getTenantAccessToken(env)).token;
     const url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id";
     const resp = await fetch(url, {
         method: "POST",
@@ -258,33 +259,27 @@ function formatTime(unixTs) {
     return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
-// ==================== 过期更新转交云函数（HMAC-SHA256 签名，EDGE_SYNC_SECRET） ====================
-async function scheduleExpiryInCloud(env, context, messageId, renewAt, expireAt, userId, keyName) {
+// ==================== 定时任务转交云函数（HMAC-SHA256 签名，EDGE_SYNC_SECRET） ====================
+// Cloud 是通用定时 HTTP 发送器：Edge 只发送模板代号 + 填充信息 + 目标时刻
+async function sendTasksInCloud(env, context, tasks) {
     try {
         const base = resolveBase(context.request, env, "CLOUD_FUNCTION_BASE");
         if (!base) {
             console.log("[EXPIRY] 无法确定 Cloud Function 地址，跳过定时任务转交");
             return;
         }
-        const payload = {
-            command: "schedule_expiry",
-            message_id: messageId,
-            user_id: userId,
-            key_name: keyName || null,
-            // 绝对时间戳（毫秒）：renew_at 首次密钥过期/续期时刻，expire_at 续期后密钥过期时刻
-            renew_at: renewAt,
-            expire_at: expireAt,
-            createdAt: Date.now(),
-        };
-        const signature = await signPayload(payload, env.EDGE_SYNC_SECRET || "");
+        // 敏感载荷（续期码 / 飞书令牌）AES-256-GCM 加密后传输，envelope 含 createdAt
+        const envelope = await encryptPayload(
+            {command: "schedule_tasks", tasks},
+            env.EDGE_SYNC_SECRET || ""
+        );
+        const signature = await signPayload(envelope, env.EDGE_SYNC_SECRET || "");
         const resp = await fetch(`${base}/api/expiry`, {
             method: "POST",
             headers: {"content-type": "application/json"},
-            body: JSON.stringify({payload, signature}),
+            body: JSON.stringify({envelope, signature}),
         });
-        console.log(
-            `[EXPIRY] 已转交云函数: message_id=${messageId} renew_at=${renewAt} expire_at=${expireAt} status=${resp.status}`
-        );
+        console.log(`[EXPIRY] 已转交云函数定时任务: ${tasks.length} 个 status=${resp.status}`);
     } catch (e) {
         console.error(`[EXPIRY] 定时任务转交失败: ${e}`);
     }
@@ -334,7 +329,7 @@ async function handleMessageEvent(env, context, eventData) {
             // 并行：KV 读密钥 + TOTP 生成 与 token 获取互不依赖，同时发起
             const otpTask = generateOtp(keyName);
             const tokenTask = getTenantAccessToken(env);
-            const [{code, expireTs, keyName: resolvedName}, bearerToken] =
+            const [{code, expireTs, keyName: resolvedName, nextCode}, tokenInfo] =
                 await Promise.all([otpTask, tokenTask]);
             if (!code) {
                 await sendTextMessage(env, userId, "该动态验证码不存在，请检查");
@@ -344,7 +339,7 @@ async function handleMessageEvent(env, context, eventData) {
             const remainingSeconds = Math.max(1, Math.floor(expireTs - Date.now() / 1000));
             const requestTimeStr = formatTime(Math.floor(Date.now() / 1000));
             // 续期：首次密钥在 expireTs 过期，续期后的新密钥再保持一个 TOTP 周期（30 秒）
-            const renewAt = expireTs * 1000 + 1000;
+            const renewAt = expireTs * 1000;
             const expireAt = (expireTs + 30) * 1000;
             const finalExpireTimeStr = formatTime(expireTs + 30);
 
@@ -357,7 +352,7 @@ async function handleMessageEvent(env, context, eventData) {
                 remainingSeconds,
                 userId,
                 resolvedName,
-                bearerToken
+                tokenInfo.token
             );
             const mgmtTask = sendManagementCard(
                 env,
@@ -368,7 +363,31 @@ async function handleMessageEvent(env, context, eventData) {
             );
             const messageId = await cardTask;
             console.log(`[ASYNC] 卡片已发送 message_id=${messageId}，转交云函数安排续期与过期`);
-            await scheduleExpiryInCloud(env, context, messageId, renewAt, expireAt, userId, resolvedName);
+            const renewTask = {
+                template: "renew_otp",
+                data: {
+                    message_id: messageId,
+                    user_id: userId,
+                    key_name: resolvedName || null,
+                    code: nextCode,
+                    code_expire_at: expireAt,
+                    token: tokenInfo.token,
+                    token_expire_at: tokenInfo.expireAt * 1000,
+                },
+                targetAt: renewAt,
+            };
+            const expireTask = {
+                template: "expire_message",
+                data: {
+                    message_id: messageId,
+                    user_id: userId,
+                    key_name: resolvedName || null,
+                    token: tokenInfo.token,
+                    token_expire_at: tokenInfo.expireAt * 1000,
+                },
+                targetAt: expireAt,
+            };
+            await sendTasksInCloud(env, context, [renewTask, expireTask]);
             await mgmtTask;
 
             console.log("[ASYNC] 消息事件处理完成");

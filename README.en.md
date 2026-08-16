@@ -9,19 +9,17 @@ Feishu event ──► Edge Function /api/feishu_callback
                   │
                   ├─ Validation: URL verification / Token / Signature / AES decrypt / timeliness
                   ├─ Handle message: get OTP (KV read + TOTP), private-chat add/update key
-                  ├─ Send text / OTP card / management notification (fetch to Feishu; token stays in Edge)
-                  │
-                  ├─ After sending the card: HMAC-signed handoff to Cloud /api/expiry (schedule_expiry with absolute timestamps)
-                  └─ Return 200 to Feishu
+                   ├─ Send text / OTP card / management notification (fetch to Feishu)
+                   ├─ Pre-generate the next-window renewal code (codeB) and obtain the Feishu auth token (with expiry)
+                   │
+                   ├─ After sending the card: AES-256-GCM encrypted + HMAC-signed handoff to Cloud /api/expiry (template code + fill data + target time, carrying codeB and the token)
+                   └─ Return 200 to Feishu
 
-Cloud Function /api/expiry (timer role only)
-                  ├─ After signature verification, only records {message_id, renew_at, expire_at, user_id, key_name} and returns 200
-                  └─ Two background timers fire on absolute timestamps and send HMAC-signed commands to Edge /api/expire:
-                     renew_at -> renew_otp (push a renewed key); expire_at -> expire_message (mark expired)
-
-Edge Function /api/expire
-                  ├─ renew_otp: regenerate the OTP and PATCH the user card (new key, still valid)
-                  └─ expire_message: PATCH the card to "expired"
+Cloud Function /api/expiry (scheduled HTTP sender, direct to Feishu)
+                   ├─ After signature verification, only records scheduled tasks (template / data / targetAt) and returns 200
+                   └─ When the absolute timestamps fire, directly PATCHes Feishu from pre-encoded Cloud templates:
+                      renew_otp -> update to the renewal code (still valid); expire_message -> mark expired
+                      (refreshes the token from env credentials when it is missing or about to expire)
 ```
 
 ## Key Features
@@ -32,7 +30,7 @@ Edge Function /api/expire
 - **Card renewal and expiry update**: When the first key expires, the Cloud timer triggers Edge to push a renewed key; when it expires again, the card is marked "expired"
 - **Merged management notification**: One request pushes 2 OTPs in total (including the renewal), and the management group card merges them into one (request time / final expiry time / push count)
 - **tenant_access_token never travels over APIs**: the token is only fetched, cached and used inside Edge; internal payloads never contain it
-- **Signed internal communication**: Edge ↔ Cloud commands are signed with `EDGE_SYNC_SECRET` + HMAC-SHA256 over a canonical JSON payload, valid for 60 seconds (`createdAt`)
+- **Encrypted and signed internal communication**: sensitive Edge → Cloud payloads (renewal code / Feishu token) are AES-256-GCM encrypted, then signed with `EDGE_SYNC_SECRET` + HMAC-SHA256 over a canonical JSON envelope, valid for 60 seconds (`createdAt`)
 
 ## Project Structure
 
@@ -41,14 +39,12 @@ feishu-otp-server/
 ├── .env                         # Environment variables configuration
 ├── package.json                 # Node.js project config (dependency: pinyin-pro)
 ├── edge-functions/
-│   ├── api/_shared.js           # Shared utilities: signing / KV / token / base resolution / expired card (no route)
+│   ├── api/_shared.js           # Shared utilities: signing / KV / token / base resolution / OTP card (no route)
 │   ├── api/feishu_callback.js   # Edge callback entry (route /api/feishu_callback)
-│   └── api/expire.js            # Edge receives Cloud expire command and PATCHes Feishu (route /api/expire)
 ├── cloud-functions/
-│   └── api/expiry.js            # Cloud timer: record + signed expire command to Edge (route /api/expiry)
+│   └── api/expiry.js            # Cloud scheduled HTTP sender: record + direct Feishu PATCH (route /api/expiry)
 └── tests/
     ├── edge_feishu_callback.test.mjs
-    ├── edge_expire.test.mjs
     └── cloud_expiry.test.mjs
 ```
 
@@ -57,30 +53,25 @@ feishu-otp-server/
 ### edge-functions/api/_shared.js (shared utilities)
 
 - Signing: `canonicalJson` (recursively sorted keys), `signPayload` / `verifyPayload` (HMAC-SHA256, 60 s freshness)
+- Sensitive payload encryption: `encryptPayload` / `decryptPayload` (AES-256-GCM, key derived from `EDGE_SYNC_SECRET`)
 - Base resolution: `resolveBase` (`EDGE_FUNCTION_BASE` / `CLOUD_FUNCTION_BASE` first, otherwise request same-origin)
 - KV read/write and `getTenantAccessToken` (KV-cached, Edge-internal only)
-- `buildExpiredCard` / `expireFeishuCard` (Edge PATCHes Feishu to mark a card expired)
+- `generateNewOtp` pre-generates the next-window OTP (`nextCode`); `getTenantAccessToken` returns `{token, expireAt}`
 - Unified `json()` responses: `{code:0,data}` / `{code:1,message}`, with `X-Edge-Error*` headers on errors
 
 ### edge-functions/api/feishu_callback.js (Edge Function)
 
 - Feishu callback protocol: URL verification, Token/signature verification, AES decryption, timeliness check
 - OTP query, private-chat key add, text/card/management notifications
-- After sending the OTP card, POSTs a signed `{command:'schedule_expiry', message_id, renew_at, expire_at, user_id, key_name, createdAt}` to Cloud `/api/expiry` (absolute timestamps avoid network-delay accumulation)
+- After sending the OTP card, POSTs a signed `{command:'schedule_tasks', tasks:[{template, data, targetAt}]}` to Cloud `/api/expiry` (tasks carry the pre-generated renewal code and the Feishu auth token with its expiry; absolute timestamps avoid network-delay accumulation)
 - The management notification is merged: request time = the request moment, expiry time = the final expiry after renewal, push count = 2
-- Built-in timing logs: `[TIMING]` prints the elapsed time of validation, OTP generation, card send, handoff and management notification stages
 
-### cloud-functions/api/expiry.js (Cloud Function, timer role only)
+### cloud-functions/api/expiry.js (Cloud Function, scheduled HTTP sender)
 
-- After verifying the signature (`EDGE_SYNC_SECRET`), only records the delayed update data (`renew_at` / `expire_at` absolute timestamps) and returns 200 immediately
-- Two background timers fire on the timestamps and send signed commands to Edge `/api/expire`: `renew_otp` (renewal) and `expire_message` (expiry)
-- Never fetches, holds, or transmits tenant_access_token
-
-### edge-functions/api/expire.js (Edge Function)
-
-- After verifying the signature (`EDGE_SYNC_SECRET`, 60 s freshness), calls Feishu `PATCH /im/v1/messages/{id}`:
-  - `renew_otp`: regenerates the current-window OTP and updates the card (still valid)
-  - `expire_message`: marks the card as "expired"
+- After verifying the signature (`EDGE_SYNC_SECRET`), only records the scheduled tasks (template code + fill data + target time) and returns 200 immediately
+- Pre-encoded `TEMPLATES` (`renew_otp` / `expire_message` -> direct Feishu `PATCH`: renewal-code card / expired card) build and send the requests when the absolute timestamps fire
+- Receives `{envelope, signature}`: verifies the signature (with `createdAt` freshness) first, then AES-GCM decrypts the task content
+- The token is carried by Edge in the task; when missing or about to expire, Cloud refreshes it from env credentials (`FEISHU_APP_ID` / `FEISHU_APP_SECRET`)
 
 ## Installation and Configuration
 
@@ -124,7 +115,7 @@ Note: the `pinyin-pro` dependency in the Edge Function is bundled via npm (beta)
 npm test
 ```
 
-Covers: Edge callback (GET / URL verification / Token / signature / timeliness / TOTP / pinyin / AES / full OTP flow with signed handoff / key add / group-chat rejection / encrypted events), Edge `/api/expire` (signature verification / stale signature / body validation / PATCH expired card), and Cloud timer (signature verification / record and ack / signed expire command / default same-origin).
+Covers: Edge callback (GET / URL verification / Token / signature / timeliness / TOTP / pinyin / AES / full OTP flow with signed handoff / key add / group-chat rejection / encrypted events), and Cloud timer (signature verification / record and ack / direct Feishu renewal and expiry PATCH / token refresh when about to expire).
 
 ## Contact
 

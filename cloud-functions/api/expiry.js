@@ -1,21 +1,17 @@
 // ============================================================================
-// EdgeOne Makers Node.js Cloud Function：OTP 卡片过期定时器
+// EdgeOne Makers Node.js Cloud Function：定时 HTTP 发送器（直连飞书）
 // 路由：/api/expiry（由文件路径 cloud-functions/api/expiry.js 决定）
 //
 // 角色（按业务要求）：
-//   1. 只记录需要延时更新的内容（message_id / 续期时刻 / 过期时刻 / 用户 / 密钥名）
-//   2. 立即返回 200 确认
-//   3. 后台等待任务（等价 Python 等待线程）按绝对时间戳到期后，向 Edge Function 发送
-//      签名指令（/api/expire）：renew_at 触发续期（renew_otp），expire_at 触发过期
-//      （expire_message），由 Edge 调用飞书更新用户卡片
+//   1. Edge 通过签名指令指定：在哪个时刻（绝对时间戳 targetAt）发送哪种请求
+//      （模板代号 template）以及填充信息（data，含预生成的续期码与飞书鉴权令牌）
+//   2. Cloud 只记录任务并立即返回 200 确认
+//   3. 后台等待任务（等价 Python 等待线程）按绝对时间戳到期后，直接调用飞书
+//      更新/过期用户卡片，不再经过 Edge
 //
-// 使用绝对时间戳而非相对延时：避免 Edge -> Cloud 的网络延时被叠加进等待时间
-//
-// 全程不接触 tenant_access_token：token 只在 Edge 内部获取与使用，不通过 API 传输。
-// 通信签名（参考 jufe-eval-flow 规范）：
-//   - 共享密钥 EDGE_SYNC_SECRET，HMAC-SHA256
-//   - 签名内容为递归按键名排序的 canonicalJson(payload)
-//   - payload 必须包含 createdAt（毫秒），60 秒内有效
+// 鉴权令牌：Edge 随任务携带 tenant_access_token 与有效期（token_expire_at）；
+// Cloud 使用时校验有效期，令牌缺失或临期时用环境凭据（FEISHU_APP_ID/SECRET）
+// 自行刷新。全程任务仅在内部签名传输，令牌不过期即用。
 // ============================================================================
 
 import crypto from "node:crypto";
@@ -52,48 +48,30 @@ function verifyPayload(payload, signature, secret, maxAgeMs = 60000, maxSkewMs =
   return safeEqual(signPayload(payload, secret), String(signature || ""));
 }
 
-// ---------- 地址前缀解析（EDGE_FUNCTION_BASE 优先，缺省请求同源） ----------
-function normalizeHost(value) {
-  return String(value || "")
-    .trim()
-    .replace(/\/+$/, "")
-    .replace(/^https?:\/\//i, "");
+// ---------- 敏感内容加密/解密（AES-256-GCM，密钥由 EDGE_SYNC_SECRET 派生） ----------
+// 与 Edge（Web Crypto）格式兼容：data = base64(密文 || 16 字节认证标签)，iv 12 字节
+function encryptPayload(payload, secret) {
+  const key = crypto.createHash("sha256").update(secret, "utf8").digest();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const enc = Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]);
+  return {
+    iv: iv.toString("base64"),
+    data: Buffer.concat([enc, cipher.getAuthTag()]).toString("base64"),
+    createdAt: Date.now(),
+  };
 }
 
-function isLoopbackHost(hostname) {
-  const h = String(hostname || "").toLowerCase();
-  if (h === "localhost" || h === "::1" || h === "[::1]" || h === "0.0.0.0") return true;
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
-  return false;
-}
-
-function resolveBase(request, env, envVarName) {
-  const candidates = [];
-  const envValue = String(env[envVarName] || "").trim();
-  if (envValue) candidates.push(envValue);
-
-  const proto =
-    String(request.headers.get("x-forwarded-proto") || "https")
-      .trim()
-      .replace(/:$/, "") || "https";
-  const eoHost = normalizeHost(request.headers.get("eo-pages-host"));
-  if (eoHost) candidates.push(`${proto}://${eoHost}`);
-  const host = normalizeHost(request.headers.get("host"));
-  if (host) candidates.push(`${proto}://${host}`);
-  const origin = String(request.headers.get("origin") || "").trim();
-  if (origin) candidates.push(origin);
-  candidates.push(`${proto}://${host || "localhost"}`);
-
-  for (const c of candidates) {
-    const b = String(c).replace(/\/+$/, "");
-    if (!/^https?:\/\//i.test(b)) continue;
-    try {
-      if (!isLoopbackHost(new URL(b).hostname)) return b;
-    } catch (e) {
-      // 非法 URL，继续尝试下一个候选
-    }
-  }
-  return candidates[0] || `${proto}://${host || "localhost"}`;
+function decryptPayload(envelope, secret) {
+  const key = crypto.createHash("sha256").update(secret, "utf8").digest();
+  const iv = Buffer.from(envelope.iv, "base64");
+  const buf = Buffer.from(envelope.data, "base64");
+  const tag = buf.subarray(buf.length - 16);
+  const data = buf.subarray(0, buf.length - 16);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  const plain = Buffer.concat([decipher.update(data), decipher.final()]);
+  return JSON.parse(plain.toString("utf8"));
 }
 
 function jsonResponse(data, status = 200) {
@@ -103,33 +81,293 @@ function jsonResponse(data, status = 200) {
   });
 }
 
-// ---------- 定时任务：按绝对时间戳到期后向 Edge 发送签名指令 ----------
-async function runTimedCommand(edgeBase, record, secret, targetAt, command) {
-  const wait = Math.max(0, targetAt - Date.now());
-  console.log(
-    `[EXPIRY] 等待 ${wait}ms 后通知 Edge ${command} ${record.message_id}（目标时刻 ${targetAt}）`
+// ---------- 卡片构建（与 Edge 保持一致） ----------
+function buildOtpCard(code, remainingSeconds, userId, keyName) {
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    body: {
+      direction: "vertical",
+      elements: [
+        {
+          tag: "column_set",
+          flex_mode: "stretch",
+          horizontal_spacing: "8px",
+          horizontal_align: "left",
+          columns: [
+            {
+              tag: "column",
+              width: "weighted",
+              background_style: "blue-50",
+              elements: [
+                {
+                  tag: "markdown",
+                  content: `## <font color='blue'>${code}</font>`,
+                  text_align: "center",
+                },
+              ],
+              padding: "16px 0px 16px 0px",
+              vertical_spacing: "2px",
+              horizontal_align: "left",
+              vertical_align: "top",
+              weight: 1,
+            },
+          ],
+          margin: "0px 0px 0px 0px",
+        },
+        {
+          tag: "markdown",
+          content: `**<font color='orange'>剩余时间：${remainingSeconds}秒</font>**`,
+          text_align: "center",
+          text_size: "normal",
+          margin: "0px 0px 0px 0px",
+          element_id: "remaining_time",
+        },
+        {
+          tag: "column_set",
+          horizontal_spacing: "8px",
+          horizontal_align: "left",
+          columns: [
+            {
+              tag: "column",
+              width: "auto",
+              elements: [
+                {
+                  tag: "markdown",
+                  content: "数据获取人：",
+                  text_align: "left",
+                  text_size: "heading",
+                  margin: "3px 0px 0px 0px",
+                },
+              ],
+              padding: "0px 0px 0px 0px",
+              direction: "vertical",
+              horizontal_spacing: "8px",
+              vertical_spacing: "8px",
+              horizontal_align: "left",
+              vertical_align: "top",
+              margin: "0px 0px 0px 0px",
+            },
+            {
+              tag: "column",
+              width: "auto",
+              elements: [
+                {
+                  tag: "person",
+                  size: "medium",
+                  user_id: userId,
+                  margin: "0px 0px 0px 0px",
+                },
+              ],
+              vertical_align: "top",
+            },
+          ],
+          margin: "0px 0px 0px 0px",
+        },
+      ],
+    },
+    header: {
+      title: {
+        tag: "plain_text",
+        content: keyName ? `${keyName} OTP动态密钥` : "OTP动态密钥",
+      },
+      subtitle: { tag: "plain_text", content: "" },
+      text_tag_list: [
+        {
+          tag: "text_tag",
+          text: { tag: "plain_text", content: "有效期内" },
+          color: "green",
+        },
+      ],
+      template: "blue",
+      icon: { tag: "standard_icon", token: "lock" },
+      padding: "12px 8px 12px 8px",
+    },
+  };
+}
+
+function buildExpiredCard(userId, keyName) {
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    body: {
+      direction: "vertical",
+      elements: [
+        {
+          tag: "column_set",
+          flex_mode: "stretch",
+          horizontal_spacing: "8px",
+          horizontal_align: "left",
+          columns: [
+            {
+              tag: "column",
+              width: "weighted",
+              background_style: "blue-50",
+              elements: [
+                {
+                  tag: "markdown",
+                  content: "## <font color='orange'>******</font>",
+                  text_align: "center",
+                },
+              ],
+              padding: "16px 0px 16px 0px",
+              vertical_spacing: "2px",
+              horizontal_align: "left",
+              vertical_align: "top",
+              weight: 1,
+            },
+          ],
+          margin: "0px 0px 0px 0px",
+        },
+        {
+          tag: "markdown",
+          content: "**<font color='orange'>剩余时间：已过期</font>**",
+          text_align: "center",
+          text_size: "normal",
+          margin: "0px 0px 0px 0px",
+          element_id: "remaining_time",
+        },
+        {
+          tag: "column_set",
+          horizontal_spacing: "8px",
+          horizontal_align: "left",
+          columns: [
+            {
+              tag: "column",
+              width: "auto",
+              elements: [
+                {
+                  tag: "markdown",
+                  content: "数据获取人：",
+                  text_align: "left",
+                  text_size: "heading",
+                  margin: "3px 0px 0px 0px",
+                },
+              ],
+              padding: "0px 0px 0px 0px",
+              direction: "vertical",
+              horizontal_spacing: "8px",
+              vertical_spacing: "8px",
+              horizontal_align: "left",
+              vertical_align: "top",
+              margin: "0px 0px 0px 0px",
+            },
+            {
+              tag: "column",
+              width: "auto",
+              elements: [
+                {
+                  tag: "person",
+                  size: "medium",
+                  user_id: userId,
+                  margin: "0px 0px 0px 0px",
+                },
+              ],
+              vertical_align: "top",
+            },
+          ],
+          margin: "0px 0px 0px 0px",
+        },
+      ],
+    },
+    header: {
+      title: {
+        tag: "plain_text",
+        content: keyName ? `${keyName} OTP动态密钥` : "OTP动态密钥",
+      },
+      subtitle: { tag: "plain_text", content: "" },
+      text_tag_list: [
+        {
+          tag: "text_tag",
+          text: { tag: "plain_text", content: "已失效" },
+          color: "red",
+        },
+      ],
+      template: "blue",
+      icon: { tag: "standard_icon", token: "lock" },
+      padding: "12px 8px 12px 8px",
+    },
+  };
+}
+
+// ---------- 令牌解析：优先用 Edge 携带的令牌，缺失/临期时用环境凭据刷新 ----------
+async function resolveToken(data, env) {
+  const now = Math.floor(Date.now() / 1000);
+  if (data.token && data.token_expire_at && now < data.token_expire_at / 1000 - 300) {
+    return data.token;
+  }
+  console.log("[TASK] 令牌缺失或临期，使用环境凭据刷新");
+  const resp = await fetch(
+    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        app_id: env.FEISHU_APP_ID || "",
+        app_secret: env.FEISHU_APP_SECRET || "",
+      }),
+    }
   );
+  const result = await resp.json();
+  if (result.code !== 0) throw new Error(`获取 token 失败: ${result.msg}`);
+  return result.tenant_access_token;
+}
+
+// ---------- 预编码模板：Edge 只传模板代号 + 填充信息，请求构造逻辑在 Cloud ----------
+const TEMPLATES = {
+  renew_otp: {
+    method: "PATCH",
+    path: (data) => `https://open.feishu.cn/open-apis/im/v1/messages/${data.message_id}`,
+    buildBody: async (data, env) => {
+      const token = await resolveToken(data, env);
+      const remaining = Math.max(
+        1,
+        Math.floor(((data.code_expire_at || Date.now()) - Date.now()) / 1000)
+      );
+      const content = buildOtpCard(data.code, remaining, data.user_id, data.key_name || null);
+      return {
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ content: JSON.stringify(content) }),
+      };
+    },
+  },
+  expire_message: {
+    method: "PATCH",
+    path: (data) => `https://open.feishu.cn/open-apis/im/v1/messages/${data.message_id}`,
+    buildBody: async (data, env) => {
+      const token = await resolveToken(data, env);
+      const content = buildExpiredCard(data.user_id, data.key_name || null);
+      return {
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ content: JSON.stringify(content) }),
+      };
+    },
+  },
+};
+
+// ---------- 定时任务：按绝对时间戳到期后直连飞书发送 ----------
+async function sendScheduledTask(task, env) {
+  const template = TEMPLATES[task.template];
+  if (!template) {
+    console.error(`[TASK] 未知模板: ${task.template}`);
+    return;
+  }
+  const wait = Math.max(0, task.targetAt - Date.now());
+  console.log(`[TASK] 等待 ${wait}ms 后发送 ${task.template}（目标时刻 ${task.targetAt}）`);
   await new Promise((resolve) => setTimeout(resolve, wait));
   try {
-    const payload = {
-      command,
-      message_id: record.message_id,
-      user_id: record.user_id,
-      key_name: record.key_name,
-      createdAt: Date.now(),
-    };
-    const signature = signPayload(payload, secret);
-    const resp = await fetch(`${edgeBase}/api/expire`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ payload, signature }),
+    const { headers, body } = await template.buildBody(task.data || {}, env);
+    const resp = await fetch(template.path(task.data || {}), {
+      method: template.method,
+      headers,
+      body,
     });
-    console.log(`[EXPIRY] 已通知 Edge ${command} ${record.message_id} status=${resp.status}`);
+    console.log(`[TASK] 已发送 ${task.template} status=${resp.status}`);
     if (resp.status !== 200) {
-      console.log(`[EXPIRY] Edge 返回异常: ${await resp.text()}`);
+      console.log(`[TASK] 飞书返回异常: ${await resp.text()}`);
     }
   } catch (e) {
-    console.error(`[EXPIRY] 通知 Edge 失败: ${e}`);
+    console.error(`[TASK] 发送失败: ${e}`);
   }
 }
 
@@ -150,50 +388,64 @@ export default async function onRequest(context) {
   }
 
   const secret = env.EDGE_SYNC_SECRET || "";
-  if (!secret || !verifyPayload(body && body.payload, body && body.signature, secret)) {
-    console.log("[EXPIRY] 签名校验失败，返回 403");
+  const envelope = body && body.envelope;
+  const signature = body && body.signature;
+  if (!secret || !verifyPayload(envelope, signature, secret)) {
+    console.log("[TASK] 签名校验失败，返回 403");
     return jsonResponse({ code: 1, message: "signature verification failed" }, 403);
   }
 
-  const p = body.payload;
-  const renewAt = Number(p.renew_at);
-  const expireAt = Number(p.expire_at);
-  if (
-    !p.message_id ||
-    !Number.isFinite(renewAt) ||
-    !Number.isFinite(expireAt) ||
-    expireAt < renewAt ||
-    !p.user_id
-  ) {
-    return jsonResponse({ code: 1, message: "invalid payload" }, 400);
+  let p;
+  try {
+    p = decryptPayload(envelope, secret);
+  } catch (e) {
+    console.log(`[TASK] 解密失败: ${e}`);
+    return jsonResponse({ code: 1, message: "decryption failed" }, 403);
   }
 
-  // 仅记录需要延时更新的内容（绝对时间戳），立即确认
-  const record = {
-    message_id: p.message_id,
-    user_id: p.user_id,
-    key_name: p.key_name || null,
-    renew_at: renewAt,
-    expire_at: expireAt,
-  };
-  const edgeBase = resolveBase(request, env, "EDGE_FUNCTION_BASE");
+  const tasks = Array.isArray(p.tasks) ? p.tasks : [];
+  if (tasks.length === 0) {
+    return jsonResponse({ code: 1, message: "invalid payload" }, 400);
+  }
+  for (const t of tasks) {
+    const targetAt = Number(t.targetAt);
+    const template = TEMPLATES[t.template];
+    const renewMissingCode = t.template === "renew_otp" && !(t.data && t.data.code);
+    if (
+      !template ||
+      !Number.isFinite(targetAt) ||
+      !t.data ||
+      !t.data.message_id ||
+      !t.data.user_id ||
+      renewMissingCode
+    ) {
+      return jsonResponse({ code: 1, message: "invalid payload" }, 400);
+    }
+  }
 
-  // 两个定时任务：renew_at 触发续期，expire_at 触发过期
-  const renewTask = runTimedCommand(edgeBase, record, secret, renewAt, "renew_otp");
-  const expireTask = runTimedCommand(edgeBase, record, secret, expireAt, "expire_message");
-  const task = Promise.allSettled([renewTask, expireTask]);
+  // 仅记录定时任务（模板代号 + 目标时刻 + 填充信息），立即确认
+  const record = tasks.map((t) => ({
+    template: t.template,
+    targetAt: Number(t.targetAt),
+    data: t.data,
+  }));
+
+  const task = Promise.allSettled(record.map((r) => sendScheduledTask(r, env)));
   if (typeof context.waitUntil === "function") {
     context.waitUntil(task);
   }
 
-  console.log(`[EXPIRY] 已记录定时任务: ${JSON.stringify(record)}`);
+  console.log(
+    `[TASK] 已记录定时任务: ${JSON.stringify(record.map((r) => ({ template: r.template, targetAt: r.targetAt })))}`
+  );
   return jsonResponse({
     code: 0,
     data: {
       ok: true,
-      message_id: record.message_id,
-      renew_at: record.renew_at,
-      expire_at: record.expire_at,
+      tasks: record.map((r) => ({ template: r.template, targetAt: r.targetAt })),
     },
   });
 }
+
+// 供本地测试使用（平台运行时忽略多余导出）
+export { encryptPayload, decryptPayload };

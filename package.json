@@ -6,7 +6,7 @@
   "description": "Feishu OTP dynamic code bot on EdgeOne Makers (Node.js Cloud Function + Edge Function KV proxy)",
   "scripts": {
     "dev": "edgeone makers dev",
-    "test": "node tests/edge_feishu_callback.test.mjs && node tests/edge_expire.test.mjs && node tests/cloud_expiry.test.mjs"
+    "test": "node tests/edge_feishu_callback.test.mjs && node tests/cloud_expiry.test.mjs"
   },
   "dependencies": {
     "pinyin-pro": "^3.26.0"
