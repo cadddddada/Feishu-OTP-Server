@@ -8,4 +8,6 @@ node_modules/
 .venv/
 __pycache__/
 tests/
+dist/*
+!dist/.gitkeep
   
