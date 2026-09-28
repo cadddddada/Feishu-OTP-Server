@@ -275,7 +275,7 @@ export function personElement(userId) {
   return {
     tag: "person",
     user_id: userId,
-    size: "medium",
+    size: "small",
     show_avatar: true,
     show_name: true,
     style: "capsule",

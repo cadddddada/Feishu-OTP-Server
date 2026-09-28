@@ -30,9 +30,9 @@ Cloud Function /api/expiry (scheduled HTTP sender, direct to Feishu)
 ## Key Features
 
 - **TOTP Generation and Query**: Send "xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码" to get a dynamic code, e.g. "阿里云TOTP" (the legacy "阿里云OTP" form still works)
-- **Self-service key management**: Send "添加密钥 XXX <secret/otpauth link>" in a private chat to add/update a key in KV
-- **Custom menu events**: A bot custom-menu item's event ID is used directly as the key identifier, so a click pushes the TTOTP card (event ID `YUNPAN` -> reads `YUNPAN_TOTP_SECRET`)
-- **Self-service add-key from the menu**: The `ADD_TOTP` event ID pushes a form card; the user fills in an identifier and a secret/otpauth link, the backend converts Chinese to pinyin and uppercases the letters before writing KV, and the result card shows three rows "密钥名称 / 添加时间 / 添加人" (no "已保存" wording — the header carries the status)
+- **Key add/update (no overwrite)**: "添加密钥 XXX <secret/otpauth link>" only creates — it is refused when the identifier already exists; "更新密钥 XXX <secret>" only updates — it is refused when the identifier does not exist
+- **Custom menu events**: A bot custom-menu item's event ID is used directly as the key identifier, so a click pushes the TOTP card (event ID `YUNPAN` -> reads `YUNPAN_TOTP_SECRET`)
+- **Self-service add-key from the menu**: The `ADD_TOTP` event ID pushes a form card; the user fills in an identifier and a secret/otpauth link, the backend converts Chinese to pinyin and uppercases the letters before writing KV, and the result card shows three rows "密钥名称 / 添加时间 / 添加人" (no "已保存" wording — the header carries the status); when the identifier already exists nothing is written and the header becomes "TOTP密钥未保存" with an update hint
 - **No key caching**: Every OTP generation reads KV in real time on the Edge side (binding variable `KV_NAMESPACE`, namespace `TOTP_SERVER`)
 - **Card renewal and expiry update**: When the first key expires, the Cloud timer triggers Edge to push a renewed key; when it expires again, the card is marked "expired"
 - **Merged management notification**: One request pushes 2 OTPs in total (including the renewal), and the management group card merges them into one (request time / final expiry time / push count)
@@ -90,9 +90,9 @@ feishu-otp-server/
 Every Feishu callback hits the same URL `https://[domain]/api/feishu_callback`, goes through shared validation, and is then routed by event type.
 
 1. **Shared validation**: GET health check; `url_verification` challenge echo; Token check (2.0 events use `header.token`); `x-lark-signature` verification (SHA-256 over `timestamp + nonce + FEISHU_ENCRYPT_KEY + body`); AES-CBC decryption of the `encrypt` field when `FEISHU_ENCRYPT_KEY` is set; message timeliness check.
-2. **Message event `im.message.receive_v1`**: `添加密钥 XXX <secret>` writes KV; `xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码` reads KV and builds the TTOTP card; anything else returns the help text.
-3. **Custom menu event `application.bot.menu_v6`**: `event_key` is the key identifier and reuses the TTOTP card flow; `ADD_TOTP` pushes the self-service add-key form card.
-4. **Card callback `card.action.trigger`**: form submits are handled synchronously (response within 3 s); on success it replies `{toast, card:{type:'raw', data}}` and shows three rows "密钥名称 / 添加时间 / 添加人"; on failure it replies only an error Toast.
+2. **Message event `im.message.receive_v1`**: `添加密钥 XXX <secret>` creates only (refused when it already exists); `更新密钥 XXX <secret>` updates only (refused when it does not exist); `xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码` reads KV and builds the TOTP card; anything else returns the help text.
+3. **Custom menu event `application.bot.menu_v6`**: `event_key` is the key identifier and reuses the TOTP card flow; `ADD_TOTP` pushes the self-service add-key form card.
+4. **Card callback `card.action.trigger`**: form submits are handled synchronously (response within 3 s); on success it replies `{toast, card:{type:'raw', data}}` and shows three rows "密钥名称 / 添加时间 / 添加人"; when the identifier already exists nothing is written and the header shows "TOTP密钥未保存" with an update hint; on validation failure it replies only an error Toast.
 5. **After the TOTP card**: renewal/expiry tasks (pre-generated code + token + absolute timestamps) are encrypted, signed and handed to Cloud `/api/expiry`, which PATCHes the card straight to Feishu when due.
 6. Message and menu events return 200 immediately and run their logic under `context.waitUntil`; card callbacks must answer synchronously and therefore skip the async branch.
 
@@ -101,11 +101,12 @@ Every Feishu callback hits the same URL `https://[domain]/api/feishu_callback`, 
 | Path | Entry | Identifier handling | Storage key |
 | --- | --- | --- | --- |
 | Manual (console) | EdgeOne KV namespace `TOTP_SERVER` | Uppercase letters/digits by hand | `TOTP_SECRET` (default) or `{IDENTIFIER}_TOTP_SECRET` |
-| Private-chat command | Send "添加密钥 XXX <secret/otpauth link>" in a private chat | `normalizeIdentifier` (Chinese to pinyin, uppercase, strip spaces/symbols) | `{IDENTIFIER}_TOTP_SECRET` |
+| Private-chat command | "添加密钥 XXX <secret/otpauth link>" (create only), "更新密钥 XXX <secret>" (update only) | `normalizeIdentifier` (Chinese to pinyin, uppercase, strip spaces/symbols) | `{IDENTIFIER}_TOTP_SECRET` |
 | Menu self-service | Custom menu `ADD_TOTP` -> form card -> save | Same as above; falls back to the otpauth label when the identifier is empty | `{IDENTIFIER}_TOTP_SECRET` |
 
 - The secret must be base32-decodable before it is written; `ADD_TOTP` is a reserved identifier (normalized to `ADDTOTP`) and cannot be used as a key name.
-- Writes overwrite: re-adding the same identifier updates it; the `xxxTOTP` query command (legacy `xxxOTP` still accepted) and the menu event ID share one identifier namespace.
+- No overwrite: "添加密钥" and the menu self-service add are both refused for an existing identifier (they point to "更新密钥"), and only "更新密钥" overwrites the stored value; when the menu add hits an existing identifier the header shows "TOTP密钥未保存".
+- The `xxxTOTP` query command (legacy `xxxOTP` still accepted) and the menu event ID share one identifier namespace.
 - Secrets are never cached: every OTP generation reads KV in real time.
 
 ## Installation and Configuration

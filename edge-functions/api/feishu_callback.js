@@ -20,6 +20,7 @@ import {
     generateNewOtp,
     getTenantAccessToken,
     json,
+    kvGet,
     kvPut,
     personElement,
     resolveBase,
@@ -103,7 +104,7 @@ function sendHelp(env, receiveId) {
     return sendTextMessage(
         env,
         receiveId,
-        "发送\u201CxxxTOTP\u201D或\u201Cxxx验证码\u201D获取动态密码，例如\u201C阿里云TOTP\u201D。\n添加/更新密钥：私聊发送\u201C添加密钥 XXX <密钥>\u201D，例如\u201C添加密钥 阿里云 JBSWY3DPEHPK3PXP\u201D；也可点击机器人自定义菜单「ADD_TOTP」自助填写。"
+        "发送\u201Cxxx TOTP\u201D或\u201Cxxx密钥\u201D获取动态密码，例如\u201C阿里云 TOTP\u201D。\n添加密钥：私聊发送\u201C添加密钥 XXX <密钥>\u201D，例如\u201C添加密钥 阿里云 JBSWY3DPEHPK3PXP\u201D。\n更新密钥：私聊发送\u201C更新密钥 XXX <密钥>\u201D；也可点击机器人自定义菜单「添加密钥」自助添加。"
     );
 }
 
@@ -243,7 +244,7 @@ function buildAddTotpCard() {
             elements: [
                 {
                     tag: "markdown",
-                    content: "填写密钥标识符与密钥（支持 base32 密钥或 otpauth 链接），点击「保存」提交。",
+                    content: "填写密钥标识符与密钥，点击「保存」提交",
                     text_size: "normal",
                     margin: "0px 0px 0px 0px",
                 },
@@ -255,8 +256,8 @@ function buildAddTotpCard() {
                         {
                             tag: "input",
                             name: "identifier",
-                            label: {tag: "plain_text", content: "密钥标识符（中文将转为大写拼音）"},
-                            placeholder: {tag: "plain_text", content: "例如：阿里云 / aliyun -> ALIYUN"},
+                            label: {tag: "plain_text", content: "密钥标识符"},
+                            placeholder: {tag: "plain_text", content: ""},
                             required: true,
                             input_type: "text",
                             width: "fill",
@@ -268,7 +269,7 @@ function buildAddTotpCard() {
                             label: {tag: "plain_text", content: "密钥 / otpauth 链接"},
                             placeholder: {
                                 tag: "plain_text",
-                                content: "例如：JBSWY3DPEHPK3PXP 或 otpauth://totp/...",
+                                content: "",
                             },
                             required: true,
                             input_type: "text",
@@ -295,7 +296,7 @@ function buildAddTotpCard() {
     };
 }
 
-function buildSavedCard(keyName, timeStr, userId = null) {
+function buildSavedCard(keyName, timeStr, userId = null, saved = true) {
     const elements = [
         row("密钥名称：", {
             tag: "markdown",
@@ -317,7 +318,9 @@ function buildSavedCard(keyName, timeStr, userId = null) {
     }
     elements.push({
         tag: "markdown",
-        content: `发送「${keyName}TOTP」即可获取动态密码。`,
+        content: saved
+            ? `发送「${keyName} TOTP」即可获取动态密码。`
+            : `标识符 ${keyName} 已被占用，本次未保存；如需更新请发送「更新密钥 ${keyName} <密钥>」。`,
         text_size: "normal",
         margin: "8px 0px 0px 0px",
     });
@@ -326,9 +329,9 @@ function buildSavedCard(keyName, timeStr, userId = null) {
         config: {update_multi: true},
         body: {direction: "vertical", elements},
         header: {
-            title: {tag: "plain_text", content: "TOTP密钥已保存"},
+            title: {tag: "plain_text", content: saved ? "TOTP密钥已保存" : "TOTP密钥未保存"},
             subtitle: {tag: "plain_text", content: ""},
-            template: "green",
+            template: saved ? "green" : "orange",
             padding: "12px 8px 12px 8px",
         },
     };
@@ -505,8 +508,8 @@ async function handleMessageEvent(env, context, eventData) {
 
         const chatType = message.chat_type || "";
 
-        // 添加/更新 TOTP密钥：添加密钥 XXX <密钥>（仅私聊）
-        if (await handleAddSecret(env, text, userId, chatType)) {
+        // 密钥指令：添加密钥（仅新增）/ 更新密钥（仅更新），仅私聊
+        if (await handleSecretCommand(env, text, userId, chatType)) {
             return;
         }
 
@@ -593,39 +596,52 @@ async function sendOtpForKey(env, context, userId, keyName) {
     return true;
 }
 
-async function handleAddSecret(env, text, userId, chatType = "") {
+// 密钥指令（仅私聊）：添加密钥（仅新增，已存在不覆盖）/ 更新密钥（仅更新，不存在不新建）
+async function handleSecretCommand(env, text, userId, chatType = "") {
     const t = String(text || "").trim();
-    if (!t.startsWith("添加密钥")) return false;
+    const isAdd = t.startsWith("添加密钥");
+    const isUpdate = t.startsWith("更新密钥");
+    if (!isAdd && !isUpdate) return false;
     if (chatType && chatType !== "p2p") {
-        await sendTextMessage(env, userId, "添加密钥仅支持在私聊中使用。");
+        await sendTextMessage(env, userId, "密钥管理仅支持在私聊中使用。");
         return true;
     }
-    if (t === "添加密钥" || /^添加密钥\s+\S+\s*$/.test(t)) {
-        await sendTextMessage(env, userId, "格式：添加密钥 XXX <密钥>，例如：添加密钥 阿里云 JBSWY3DPEHPK3PXP");
+    const cmd = isAdd ? "添加密钥" : "更新密钥";
+    const example = `${cmd} 阿里云 JBSWY3DPEHPK3PXP`;
+    if (t === cmd || new RegExp(`^${cmd}\\s+\\S+\\s*$`).test(t)) {
+        await sendTextMessage(env, userId, `格式：${cmd} XXX <密钥>，例如：${example}`);
         return true;
     }
-    const m = t.match(/^添加密钥\s+(\S+)\s+(\S+)\s*$/);
+    const m = t.match(new RegExp(`^${cmd}\\s+(\\S+)\\s+(\\S+)\\s*$`));
     if (!m) return false;
-    const keyPrefix = m[1];
-    const keyName = normalizeIdentifier(keyPrefix);
+    const keyName = normalizeIdentifier(m[1]);
     if (!keyName) {
         await sendTextMessage(env, userId, "标识符无效（需包含中文、字母或数字），请检查后重试。");
         return true;
     }
     if (RESERVED_KEY_NAMES.has(keyName)) {
-        await sendTextMessage(env, userId, `标识符 ${ADD_TOTP_EVENT_KEY} 为系统保留字（用于自助添加密钥菜单事件），请更换。`);
+        await sendTextMessage(env, userId, `标识符 ${ADD_TOTP_EVENT_KEY} 为系统保留字，请更换。`);
         return true;
     }
     const kvKey = `${keyName}_TOTP_SECRET`;
     const parsed = parseSecretInput(m[2]);
     if (parsed.error) {
-        await sendTextMessage(env, userId, `${parsed.error}。示例：添加密钥 阿里云 JBSWY3DPEHPK3PXP`);
+        await sendTextMessage(env, userId, `${parsed.error}。示例：${example}`);
         return true;
     }
     try {
         base32Decode(parsed.secret);
     } catch (e) {
-        await sendTextMessage(env, userId, "密钥格式无效（需要 base32 格式），请检查后重试。示例：添加密钥 阿里云 JBSWY3DPEHPK3PXP");
+        await sendTextMessage(env, userId, `密钥格式无效（需要 base32 格式），请检查后重试。示例：${example}`);
+        return true;
+    }
+    const exists = Boolean(await kvGet(kvKey, ""));
+    if (isAdd && exists) {
+        await sendTextMessage(env, userId, `标识符 ${keyName} 已存在，未添加。如需更新请发送\u201C更新密钥 ${keyName} <密钥>\u201D。`);
+        return true;
+    }
+    if (isUpdate && !exists) {
+        await sendTextMessage(env, userId, `标识符 ${keyName} 不存在，请先发送\u201C添加密钥 ${keyName} <密钥>\u201D添加。`);
         return true;
     }
     if (!(await kvPut(kvKey, parsed.secret))) {
@@ -635,7 +651,7 @@ async function handleAddSecret(env, text, userId, chatType = "") {
     await sendTextMessage(
         env,
         userId,
-        `已添加/更新密钥 ${keyName}（存储键：${kvKey}）。发送\u201C${keyName}TOTP\u201D即可获取动态密码。`
+        `已${isAdd ? "添加" : "更新"}密钥 ${keyName}（存储键：${kvKey}）。发送\u201C${keyName}TOTP\u201D即可获取动态密码。`
     );
     return true;
 }
@@ -681,10 +697,18 @@ async function handleAddTotpSubmit(env, formValue, userId = null) {
         return {toast: {type: "error", content: "密钥格式无效（需要 base32 格式），请检查后重试"}};
     }
     const kvKey = `${keyName}_TOTP_SECRET`;
+    const timeStr = formatTime(Math.floor(Date.now() / 1000));
+    // 已有同名标识符时不覆盖，仅回显“未保存”
+    if (await kvGet(kvKey, "")) {
+        console.log(`[CARD] 标识符已存在，未保存: ${kvKey}`);
+        return {
+            toast: {type: "warning", content: "标识符已存在，未保存"},
+            card: {type: "raw", data: buildSavedCard(keyName, timeStr, userId, false)},
+        };
+    }
     if (!(await kvPut(kvKey, parsed.secret))) {
         return {toast: {type: "error", content: "密钥保存失败，请稍后重试"}};
     }
-    const timeStr = formatTime(Math.floor(Date.now() / 1000));
     console.log(`[CARD] 自助添加密钥成功: ${kvKey}`);
     return {
         toast: {type: "success", content: "已保存"},

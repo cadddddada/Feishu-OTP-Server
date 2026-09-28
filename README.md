@@ -28,9 +28,9 @@ Cloud Function /api/expiry（定时 HTTP 发送器，直连飞书）
 ## 主要功能
 
 - **TOTP 生成与查询**：发送“xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码”获取动态密码，例如“阿里云TOTP”（兼容旧写法“阿里云OTP”）
-- **密钥自助添加/更新**：私聊发送“添加密钥 XXX <密钥/otpauth 链接>”写入/更新 KV，例如“添加密钥 阿里云 JBSWY3DPEHPK3PXP”
-- **自定义菜单事件**：机器人自定义菜单项的事件 ID 直接作为密钥标识符，点击即推送 TTOTP 卡片（如事件 ID `YUNPAN` → 读取 `YUNPAN_TOTP_SECRET`）
-- **菜单自助添加密钥**：事件 ID `ADD_TOTP` 触发表单卡片，用户填写标识符与密钥/otpauth 链接；后端中文转拼音、字母统一大写后写入 KV，并把结果卡片更新为“密钥名称 / 添加时间 / 添加人”三行（无“已保存”文案，标题即状态）
+- **密钥添加/更新（不覆盖）**：私聊“添加密钥 XXX <密钥/otpauth 链接>”仅新增，标识符已存在时拒绝；“更新密钥 XXX <密钥>”仅更新，标识符不存在时拒绝
+- **自定义菜单事件**：机器人自定义菜单项的事件 ID 直接作为密钥标识符，点击即推送 TOTP 卡片（如事件 ID `YUNPAN` → 读取 `YUNPAN_TOTP_SECRET`）
+- **菜单自助添加密钥**：事件 ID `ADD_TOTP` 触发表单卡片，用户填写标识符与密钥/otpauth 链接；后端中文转拼音、字母统一大写后写入 KV，并把结果卡片更新为“密钥名称 / 添加时间 / 添加人”三行（无“已保存”文案，标题即状态）；标识符已存在时拒绝写入，卡片标题变为“TOTP密钥未保存”并给出更新指引
 - **密钥不缓存**：每次生成 OTP 都在 Edge 侧实时读取 KV（绑定变量 `KV_NAMESPACE`，命名空间 `TOTP_SERVER`）
 - **卡片续期与过期更新**：首次密钥过期时 Cloud 定时触发 Edge 续期推送新密钥，再次过期后置为“已失效”
 - **合并管理通知**：一次请求累计推送 2 次 OTP（含续期），管理群卡片合并为一条（获取时间 / 最终过期时间 / 推送次数）
@@ -88,9 +88,9 @@ feishu-otp-server/
 所有飞书回调都进入同一个地址 `https://[域名]/api/feishu_callback`，先做统一校验，再按事件类型分流。
 
 1. **统一校验**：GET 探活；`url_verification` 回显 challenge；Token 校验（2.0 事件取 `header.token`）；`x-lark-signature` 签名校验（`timestamp + nonce + FEISHU_ENCRYPT_KEY + body` 的 SHA-256）；配置 `FEISHU_ENCRYPT_KEY` 时对 `encrypt` 字段 AES-CBC 解密；消息时效校验。
-2. **消息事件 `im.message.receive_v1`**：`添加密钥 XXX <密钥>` → 写 KV；`xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码` → 读 KV 生成 TTOTP 卡片；其他 → 帮助文本。
-3. **自定义菜单事件 `application.bot.menu_v6`**：`event_key` 即密钥标识符 → 复用 TTOTP 卡片流程；`ADD_TOTP` → 推送自助添加密钥表单卡片。
-4. **卡片回调 `card.action.trigger`**：同步处理表单提交（3 秒内响应），成功时返回 `{toast, card:{type:'raw', data}}` 并把结果卡片更新为“密钥名称 / 添加时间 / 添加人”三行；失败时只返回错误 Toast。
+2. **消息事件 `im.message.receive_v1`**：`添加密钥 XXX <密钥>` → 仅新增（已存在则拒绝）；`更新密钥 XXX <密钥>` → 仅更新（不存在则拒绝）；`xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码` → 读 KV 生成 TOTP 卡片；其他 → 帮助文本。
+3. **自定义菜单事件 `application.bot.menu_v6`**：`event_key` 即密钥标识符 → 复用 TOTP 卡片流程；`ADD_TOTP` → 推送自助添加密钥表单卡片。
+4. **卡片回调 `card.action.trigger`**：同步处理表单提交（3 秒内响应），成功时返回 `{toast, card:{type:'raw', data}}` 并把结果卡片更新为“密钥名称 / 添加时间 / 添加人”三行；标识符已存在时不写入，卡片标题显示“TOTP密钥未保存”并给出更新指引；校验失败时只返回错误 Toast。
 5. **TOTP 卡片后续**：发卡后把续期/过期任务（预生成续期码 + 令牌 + 绝对时间戳）加密签名转交 Cloud `/api/expiry`，Cloud 到点直连飞书 PATCH 卡片。
 6. 消息/菜单事件立即返回 200，业务逻辑由 `context.waitUntil` 异步执行；卡片回调必须同步返回，因此不走异步分支。
 
@@ -99,11 +99,12 @@ feishu-otp-server/
 | 路径 | 入口 | 标识符处理 | 存储键 |
 | --- | --- | --- | --- |
 | 控制台手动 | EdgeOne KV 命名空间 `TOTP_SERVER` | 人工保证为大写字母/数字 | `TOTP_SECRET`（默认）或 `{标识符}_TOTP_SECRET` |
-| 私聊命令 | 私聊发送“添加密钥 XXX <密钥/otpauth 链接>” | `normalizeIdentifier`（中文转拼音、字母大写、剔除空格与符号） | `{标识符}_TOTP_SECRET` |
+| 私聊命令 | “添加密钥 XXX <密钥/otpauth 链接>”（仅新增）、“更新密钥 XXX <密钥>”（仅更新） | `normalizeIdentifier`（中文转拼音、字母大写、剔除空格与符号） | `{标识符}_TOTP_SECRET` |
 | 菜单自助 | 自定义菜单 `ADD_TOTP` → 表单卡片 → 保存 | 同上；标识符留空时回退到 otpauth 链接的 label | `{标识符}_TOTP_SECRET` |
 
 - 写入前校验 base32 可解码；`ADD_TOTP` 为系统保留标识符（规范化后为 `ADDTOTP`），不允许作为密钥名。
-- 写入即覆盖：同名标识符再次添加等同更新；查询命令 `xxxTOTP`（兼容 `xxxOTP`）与菜单事件 ID 共用同一标识符空间。
+- 不覆盖：同名标识符的“添加密钥”与菜单自助添加都会被拒绝（提示改用“更新密钥”），只有“更新密钥”会覆盖已有值；菜单自助添加在标识符已存在时卡片标题显示“TOTP密钥未保存”。
+- 查询命令 `xxxTOTP`（兼容 `xxxOTP`）与菜单事件 ID 共用同一标识符空间。
 - 密钥不入缓存，每次生成 OTP 都实时读取 KV。
 
 ## 安装与配置
