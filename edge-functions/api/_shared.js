@@ -229,8 +229,10 @@ export async function kvPut(key, value) {
     const valueStr = typeof value === "string" ? value : JSON.stringify(value);
     console.log(`[KV] put: ${key}`);
     await KV_NAMESPACE.put(key, valueStr);
+    return true;
   } catch (e) {
     console.log(`[KV] put error: ${e}`);
+    return false;
   }
 }
 

@@ -37,6 +37,53 @@ function chineseToPinyin(text) {
     }
 }
 
+// ==================== 密钥标识符规范化 ====================
+// 规则：中文转拼音、英文字母统一大写、剔除空格与符号
+// 例："阿里云" / "ali yun" / "ali-yun" -> "ALIYUN"
+const ADD_TOTP_EVENT_KEY = "ADD_TOTP";
+// 保留标识符：规范化后会剔除下划线，ADD_TOTP -> ADDTOTP
+const RESERVED_KEY_NAMES = new Set([ADD_TOTP_EVENT_KEY.replace(/[^0-9A-Za-z]/g, "").toUpperCase()]);
+const KEY_NAME_MAX_LENGTH = 64;
+
+function normalizeIdentifier(text) {
+    const raw = String(text ?? "").trim();
+    if (!raw) return "";
+    let converted;
+    try {
+        converted = pinyin(raw, {toneType: "none", type: "array", v: true}).join("");
+    } catch (e) {
+        converted = raw;
+    }
+    return converted.replace(/[^0-9A-Za-z]/g, "").toUpperCase();
+}
+
+function safeDecode(value) {
+    try {
+        return decodeURIComponent(value);
+    } catch (e) {
+        return value;
+    }
+}
+
+// 解析密钥输入：支持纯 base32 密钥与 otpauth:// 链接
+function parseSecretInput(input) {
+    const raw = String(input ?? "").trim();
+    if (!raw) return {error: "密钥不能为空"};
+    if (/^otpauth:\/\//i.test(raw)) {
+        let url;
+        try {
+            url = new URL(raw);
+        } catch (e) {
+            return {error: "otpauth 链接格式无效"};
+        }
+        const secret = (url.searchParams.get("secret") || "").replace(/\s+/g, "").toUpperCase();
+        if (!secret) return {error: "otpauth 链接中缺少 secret 参数"};
+        const label = safeDecode(String(url.pathname || "").replace(/^\/+/, "")).trim();
+        return {secret, label};
+    }
+    return {secret: raw.replace(/\s+/g, "").toUpperCase()};
+}
+
 async function sendTextMessage(env, receiveId, textContent) {
     const { token } = await getTenantAccessToken(env);
     const url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id";
@@ -55,7 +102,7 @@ function sendHelp(env, receiveId) {
     return sendTextMessage(
         env,
         receiveId,
-        "发送\u201CxxxOTP\u201D或\u201Cxxx验证码\u201D获取动态密码，例如\u201C阿里云OTP\u201D。\n添加/更新密钥：私聊发送\u201C添加密钥 XXX <密钥>\u201D，例如\u201C添加密钥 阿里云 JBSWY3DPEHPK3PXP\u201D。"
+        "发送\u201CxxxOTP\u201D或\u201Cxxx验证码\u201D获取动态密码，例如\u201C阿里云OTP\u201D。\n添加/更新密钥：私聊发送\u201C添加密钥 XXX <密钥>\u201D，例如\u201C添加密钥 阿里云 JBSWY3DPEHPK3PXP\u201D；也可点击机器人自定义菜单「ADD_TOTP」自助填写。"
     );
 }
 
@@ -141,7 +188,7 @@ function buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay) {
     };
 }
 
-async function sendOtpCard(env, receiveId, code, remainingSeconds, userId, keyName = null, token = null) {
+async function sendInteractiveCard(env, receiveId, card, token = null) {
     const bearer = token || (await getTenantAccessToken(env)).token;
     const url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id";
     const resp = await fetch(url, {
@@ -150,12 +197,21 @@ async function sendOtpCard(env, receiveId, code, remainingSeconds, userId, keyNa
         body: JSON.stringify({
             receive_id: receiveId,
             msg_type: "interactive",
-            content: JSON.stringify(buildOtpCard(code, remainingSeconds, userId, keyName)),
+            content: JSON.stringify(card),
         }),
     });
     const result = await resp.json();
     if (result.code !== 0) throw new Error(`发送卡片失败: ${result.msg}`);
     return result.data.message_id;
+}
+
+async function sendOtpCard(env, receiveId, code, remainingSeconds, userId, keyName = null, token = null) {
+    return sendInteractiveCard(
+        env,
+        receiveId,
+        buildOtpCard(code, remainingSeconds, userId, keyName),
+        token
+    );
 }
 
 async function sendManagementCard(
@@ -176,6 +232,101 @@ async function sendManagementCard(
             card: buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay),
         }),
     });
+}
+
+// ==================== 自助添加密钥卡片 ====================
+// 菜单事件 ADD_TOTP 触发的表单卡片（卡片 JSON 2.0，form 必须直接挂在 body 下）
+function buildAddTotpCard() {
+    return {
+        schema: "2.0",
+        config: {update_multi: true},
+        body: {
+            direction: "vertical",
+            elements: [
+                {
+                    tag: "markdown",
+                    content: "填写密钥标识符与密钥（支持 base32 密钥或 otpauth 链接），点击「保存」提交。",
+                    text_size: "normal",
+                    margin: "0px 0px 0px 0px",
+                },
+                {
+                    tag: "form",
+                    name: "add_totp_form",
+                    direction: "vertical",
+                    elements: [
+                        {
+                            tag: "input",
+                            name: "identifier",
+                            label: {tag: "plain_text", content: "密钥标识符（中文将转为大写拼音）"},
+                            placeholder: {tag: "plain_text", content: "例如：阿里云 / aliyun -> ALIYUN"},
+                            required: true,
+                            input_type: "text",
+                            width: "fill",
+                            max_length: 64,
+                        },
+                        {
+                            tag: "input",
+                            name: "secret",
+                            label: {tag: "plain_text", content: "密钥 / otpauth 链接"},
+                            placeholder: {
+                                tag: "plain_text",
+                                content: "例如：JBSWY3DPEHPK3PXP 或 otpauth://totp/...",
+                            },
+                            required: true,
+                            input_type: "text",
+                            width: "fill",
+                        },
+                        {
+                            tag: "button",
+                            name: "submit",
+                            text: {tag: "plain_text", content: "保存"},
+                            type: "primary_filled",
+                            width: "fill",
+                            form_action_type: "submit",
+                        },
+                    ],
+                },
+            ],
+        },
+        header: {
+            title: {tag: "plain_text", content: "自助添加 TOTP 密钥"},
+            subtitle: {tag: "plain_text", content: ""},
+            template: "blue",
+            icon: {tag: "standard_icon", token: "lock"},
+            padding: "12px 8px 12px 8px",
+        },
+    };
+}
+
+function buildSavedCard(keyName, timeStr) {
+    return {
+        schema: "2.0",
+        config: {update_multi: true},
+        body: {
+            direction: "vertical",
+            elements: [
+                {
+                    tag: "markdown",
+                    content: `已保存 密钥名称：${keyName} 添加时间：${timeStr}`,
+                    text_size: "normal",
+                    margin: "0px 0px 0px 0px",
+                },
+                {
+                    tag: "markdown",
+                    content: `发送「${keyName}OTP」即可获取动态密码。`,
+                    text_size: "normal",
+                    margin: "4px 0px 0px 0px",
+                },
+            ],
+        },
+        header: {
+            title: {tag: "plain_text", content: "TOTP 密钥已保存"},
+            subtitle: {tag: "plain_text", content: ""},
+            template: "green",
+            icon: {tag: "standard_icon", token: "lock"},
+            padding: "12px 8px 12px 8px",
+        },
+    };
 }
 
 // ==================== OTP 生成 ====================
@@ -290,8 +441,40 @@ async function handleEvent(env, context, eventData) {
     const eventType = eventData.type;
     if (eventType === "im.message.receive_v1") {
         await handleMessageEvent(env, context, eventData);
+    } else if (eventType === "application.bot.menu_v6") {
+        await handleMenuEvent(env, context, eventData);
     } else {
         console.log(`[INFO] 忽略未处理的事件类型: ${eventType}`);
+    }
+}
+
+// 自定义菜单事件：事件 ID 即密钥标识符（菜单事件 ID = YUNPAN 时读取 YUNPAN_TOTP_SECRET）
+// 例外：事件 ID = ADD_TOTP 时推送自助添加密钥卡片
+async function handleMenuEvent(env, context, eventData) {
+    try {
+        const event = eventData.event || {};
+        const operator = event.operator || {};
+        const operatorId = operator.operator_id || {};
+        const userId = operatorId.open_id || operator.open_id || operatorId.user_id;
+        const eventKey = String(event.event_key || "").trim();
+        if (!userId) {
+            console.log("[ERROR] 菜单事件无法获取用户ID");
+            return;
+        }
+        const keyName = normalizeIdentifier(eventKey);
+        if (!keyName) {
+            await sendHelp(env, userId);
+            return;
+        }
+        if (RESERVED_KEY_NAMES.has(keyName)) {
+            await sendInteractiveCard(env, userId, buildAddTotpCard());
+            console.log("[MENU] 已推送自助添加密钥卡片");
+            return;
+        }
+        console.log(`[MENU] 菜单事件 ${eventKey} -> 密钥标识符 ${keyName}`);
+        await sendOtpForKey(env, context, userId, keyName);
+    } catch (e) {
+        console.error(`处理菜单事件出错: ${e}`);
     }
 }
 
@@ -325,78 +508,84 @@ async function handleMessageEvent(env, context, eventData) {
         // 解析多密钥格式: xxxOTP / xxx验证码 / xxx密钥 / xxx动态码
         const keyPrefix = parseOtpKey(text);
         if (keyPrefix !== null) {
-            const keyName = keyPrefix ? chineseToPinyin(keyPrefix) : null;
-            // 并行：KV 读密钥 + TOTP 生成 与 token 获取互不依赖，同时发起
-            const otpTask = generateOtp(keyName);
-            const tokenTask = getTenantAccessToken(env);
-            const [{code, expireTs, keyName: resolvedName, nextCode}, tokenInfo] =
-                await Promise.all([otpTask, tokenTask]);
-            if (!code) {
-                await sendTextMessage(env, userId, "该动态验证码不存在，请检查");
-                return;
-            }
-
-            const remainingSeconds = Math.max(1, Math.floor(expireTs - Date.now() / 1000));
-            const requestTimeStr = formatTime(Math.floor(Date.now() / 1000));
-            // 续期：首次密钥在 expireTs 过期，续期后的新密钥再保持一个 TOTP 周期（30 秒）
-            const renewAt = expireTs * 1000;
-            const expireAt = (expireTs + 30) * 1000;
-            const finalExpireTimeStr = formatTime(expireTs + 30);
-
-            // 并行：发送 OTP 卡片 与 合并的管理群通知（2 次推送日志合并）互不依赖；
-            // 卡片返回后立即把续期/过期定时任务转交云函数
-            const cardTask = sendOtpCard(
-                env,
-                userId,
-                code,
-                remainingSeconds,
-                userId,
-                resolvedName,
-                tokenInfo.token
-            );
-            const mgmtTask = sendManagementCard(
-                env,
-                userId,
-                requestTimeStr,
-                finalExpireTimeStr,
-                resolvedName
-            );
-            const messageId = await cardTask;
-            console.log(`[ASYNC] 卡片已发送 message_id=${messageId}，转交云函数安排续期与过期`);
-            const renewTask = {
-                template: "renew_otp",
-                data: {
-                    message_id: messageId,
-                    user_id: userId,
-                    key_name: resolvedName || null,
-                    code: nextCode,
-                    code_expire_at: expireAt,
-                    token: tokenInfo.token,
-                    token_expire_at: tokenInfo.expireAt * 1000,
-                },
-                targetAt: renewAt,
-            };
-            const expireTask = {
-                template: "expire_message",
-                data: {
-                    message_id: messageId,
-                    user_id: userId,
-                    key_name: resolvedName || null,
-                    token: tokenInfo.token,
-                    token_expire_at: tokenInfo.expireAt * 1000,
-                },
-                targetAt: expireAt,
-            };
-            await sendTasksInCloud(env, context, [renewTask, expireTask]);
-            await mgmtTask;
-
-            console.log("[ASYNC] 消息事件处理完成");
+            const keyName = keyPrefix ? normalizeIdentifier(keyPrefix) || null : null;
+            await sendOtpForKey(env, context, userId, keyName);
         } else {
             await sendHelp(env, userId);
         }
     } catch (e) {
         console.error(`处理消息事件出错: ${e}`);
     }
+}
+
+// 生成 OTP 卡片并按绝对时间戳安排续期/过期（消息事件与菜单事件共用）
+async function sendOtpForKey(env, context, userId, keyName) {
+    // 并行：KV 读密钥 + TOTP 生成 与 token 获取互不依赖，同时发起
+    const otpTask = generateOtp(keyName);
+    const tokenTask = getTenantAccessToken(env);
+    const [{code, expireTs, keyName: resolvedName, nextCode}, tokenInfo] =
+        await Promise.all([otpTask, tokenTask]);
+    if (!code) {
+        await sendTextMessage(env, userId, "该动态验证码不存在，请检查");
+        return false;
+    }
+
+    const remainingSeconds = Math.max(1, Math.floor(expireTs - Date.now() / 1000));
+    const requestTimeStr = formatTime(Math.floor(Date.now() / 1000));
+    // 续期：首次密钥在 expireTs 过期，续期后的新密钥再保持一个 TOTP 周期（30 秒）
+    const renewAt = expireTs * 1000;
+    const expireAt = (expireTs + 30) * 1000;
+    const finalExpireTimeStr = formatTime(expireTs + 30);
+
+    // 并行：发送 OTP 卡片 与 合并的管理群通知（2 次推送日志合并）互不依赖；
+    // 卡片返回后立即把续期/过期定时任务转交云函数
+    const cardTask = sendOtpCard(
+        env,
+        userId,
+        code,
+        remainingSeconds,
+        userId,
+        resolvedName,
+        tokenInfo.token
+    );
+    const mgmtTask = sendManagementCard(
+        env,
+        userId,
+        requestTimeStr,
+        finalExpireTimeStr,
+        resolvedName
+    );
+    const messageId = await cardTask;
+    console.log(`[ASYNC] 卡片已发送 message_id=${messageId}，转交云函数安排续期与过期`);
+    const renewTask = {
+        template: "renew_otp",
+        data: {
+            message_id: messageId,
+            user_id: userId,
+            key_name: resolvedName || null,
+            code: nextCode,
+            code_expire_at: expireAt,
+            token: tokenInfo.token,
+            token_expire_at: tokenInfo.expireAt * 1000,
+        },
+        targetAt: renewAt,
+    };
+    const expireTask = {
+        template: "expire_message",
+        data: {
+            message_id: messageId,
+            user_id: userId,
+            key_name: resolvedName || null,
+            token: tokenInfo.token,
+            token_expire_at: tokenInfo.expireAt * 1000,
+        },
+        targetAt: expireAt,
+    };
+    await sendTasksInCloud(env, context, [renewTask, expireTask]);
+    await mgmtTask;
+
+    console.log("[ASYNC] OTP 卡片处理完成");
+    return true;
 }
 
 async function handleAddSecret(env, text, userId, chatType = "") {
@@ -413,22 +602,87 @@ async function handleAddSecret(env, text, userId, chatType = "") {
     const m = t.match(/^添加密钥\s+(\S+)\s+(\S+)\s*$/);
     if (!m) return false;
     const keyPrefix = m[1];
-    const secret = m[2];
-    const keyName = chineseToPinyin(keyPrefix);
+    const keyName = normalizeIdentifier(keyPrefix);
+    if (!keyName) {
+        await sendTextMessage(env, userId, "标识符无效（需包含中文、字母或数字），请检查后重试。");
+        return true;
+    }
+    if (RESERVED_KEY_NAMES.has(keyName)) {
+        await sendTextMessage(env, userId, `标识符 ${ADD_TOTP_EVENT_KEY} 为系统保留字（用于自助添加密钥菜单事件），请更换。`);
+        return true;
+    }
     const kvKey = `${keyName}_TOTP_SECRET`;
+    const parsed = parseSecretInput(m[2]);
+    if (parsed.error) {
+        await sendTextMessage(env, userId, `${parsed.error}。示例：添加密钥 阿里云 JBSWY3DPEHPK3PXP`);
+        return true;
+    }
     try {
-        base32Decode(secret);
+        base32Decode(parsed.secret);
     } catch (e) {
         await sendTextMessage(env, userId, "密钥格式无效（需要 base32 格式），请检查后重试。示例：添加密钥 阿里云 JBSWY3DPEHPK3PXP");
         return true;
     }
-    await kvPut(kvKey, secret);
+    if (!(await kvPut(kvKey, parsed.secret))) {
+        await sendTextMessage(env, userId, "密钥保存失败，请稍后重试。");
+        return true;
+    }
     await sendTextMessage(
         env,
         userId,
-        `已添加/更新密钥 ${keyPrefix}（存储键：${kvKey}）。发送\u201C${keyPrefix}OTP\u201D即可获取动态密码。`
+        `已添加/更新密钥 ${keyName}（存储键：${kvKey}）。发送\u201C${keyName}OTP\u201D即可获取动态密码。`
     );
     return true;
+}
+
+// ==================== 卡片回调（card.action.trigger） ====================
+// 表单提交：标识符规范化（中文转拼音、统一大写）+ 密钥/otpauth 解析 + 写 KV，
+// 响应体直接返回更新后的卡片（3 秒内同步响应）
+async function handleCardAction(env, eventData) {
+    const event = eventData.event || {};
+    const action = event.action || {};
+    const formValue = action.form_value;
+    console.log(`[CARD] 收到卡片交互 tag=${action.tag || ""} name=${action.name || ""}`);
+    if (action.tag === "button" && formValue && typeof formValue === "object") {
+        return await handleAddTotpSubmit(env, formValue);
+    }
+    return {toast: {type: "info", content: "暂不支持的操作"}};
+}
+
+async function handleAddTotpSubmit(env, formValue) {
+    const values = formValue && typeof formValue === "object" ? formValue : {};
+    const identifierRaw = String(values.identifier ?? "").trim();
+    const parsed = parseSecretInput(values.secret);
+    if (parsed.error) {
+        // 仅返回 Toast 时飞书保持原卡片（用户已填内容不丢失），便于修正后重新提交
+        return {toast: {type: "error", content: parsed.error}};
+    }
+    let keyName = normalizeIdentifier(identifierRaw);
+    if (!keyName && parsed.label) keyName = normalizeIdentifier(parsed.label);
+    if (!keyName) {
+        return {toast: {type: "error", content: "标识符不能为空（可填英文或中文，系统会转为大写拼音）"}};
+    }
+    if (RESERVED_KEY_NAMES.has(keyName)) {
+        return {toast: {type: "error", content: `标识符 ${ADD_TOTP_EVENT_KEY} 为系统保留字，请更换`}};
+    }
+    if (keyName.length > KEY_NAME_MAX_LENGTH) {
+        return {toast: {type: "error", content: `标识符过长（最多 ${KEY_NAME_MAX_LENGTH} 个字符）`}};
+    }
+    try {
+        base32Decode(parsed.secret);
+    } catch (e) {
+        return {toast: {type: "error", content: "密钥格式无效（需要 base32 格式），请检查后重试"}};
+    }
+    const kvKey = `${keyName}_TOTP_SECRET`;
+    if (!(await kvPut(kvKey, parsed.secret))) {
+        return {toast: {type: "error", content: "密钥保存失败，请稍后重试"}};
+    }
+    const timeStr = formatTime(Math.floor(Date.now() / 1000));
+    console.log(`[CARD] 自助添加密钥成功: ${kvKey}`);
+    return {
+        toast: {type: "success", content: "已保存"},
+        card: {type: "raw", data: buildSavedCard(keyName, timeStr)},
+    };
 }
 
 function parseOtpKey(text) {
@@ -483,6 +737,12 @@ export default async function onRequest(context) {
         }
     }
 
+    // 飞书 2.0 事件（自定义菜单 / 卡片回调 / 消息事件）把事件类型与校验 Token 放在 header 中
+    if (eventData && eventData.header) {
+        if (!eventData.type) eventData.type = eventData.header.event_type;
+        if (!eventData.token) eventData.token = eventData.header.token;
+    }
+
     if (!(await verifyToken(env, eventData.token))) {
         console.log("[ERROR] Token 验证失败，返回 403");
         return json({code: 403, msg: "Token mismatch"}, 403);
@@ -504,6 +764,18 @@ export default async function onRequest(context) {
         return json({code: 400, msg: "Message expired"}, 400);
     }
 
+    // 卡片回调必须同步响应（3 秒内返回 Toast / 更新后的卡片），不走异步分支
+    if (eventData.type === "card.action.trigger") {
+        let view;
+        try {
+            view = await handleCardAction(env, eventData);
+        } catch (e) {
+            console.error(`[ERROR] 卡片回调处理失败: ${e}`);
+            view = {toast: {type: "error", content: "处理失败，请稍后重试"}};
+        }
+        return json(view);
+    }
+
     // 立即返回 200，后台异步处理业务逻辑
     const task = handleEvent(env, context, eventData).catch((e) =>
         console.error(`[ERROR] 异步事件处理异常: ${e}`)
@@ -515,4 +787,4 @@ export default async function onRequest(context) {
 }
 
 // 供本地测试使用（平台运行时忽略多余导出）
-export {base32Decode, chineseToPinyin, parseOtpKey, aesDecrypt, totp};
+export {base32Decode, chineseToPinyin, parseOtpKey, aesDecrypt, totp, normalizeIdentifier, parseSecretInput, handleAddTotpSubmit};
