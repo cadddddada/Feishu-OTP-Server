@@ -236,6 +236,17 @@ export async function kvPut(key, value) {
   }
 }
 
+export async function kvDelete(key) {
+  try {
+    console.log(`[KV] delete: ${key}`);
+    await KV_NAMESPACE.delete(key);
+    return true;
+  } catch (e) {
+    console.log(`[KV] delete error: ${e}`);
+    return false;
+  }
+}
+
 // ---------- tenant_access_token（KV 缓存 + 实例内内存缓存，仅在 Edge 内部使用） ----------
 let _memToken = null;
 
@@ -328,6 +339,7 @@ export function buildOtpCard(code, remainingSeconds, userId, keyName) {
           tag: "column_set",
           horizontal_spacing: "8px",
           horizontal_align: "left",
+          vertical_align: "center",
           columns: [
             {
               tag: "column",
@@ -338,7 +350,7 @@ export function buildOtpCard(code, remainingSeconds, userId, keyName) {
                   content: "数据获取人：",
                   text_align: "left",
                   text_size: "heading",
-                  margin: "3px 0px 0px 0px",
+                  margin: "0px 0px 0px 0px",
                 },
               ],
               padding: "0px 0px 0px 0px",
@@ -346,7 +358,7 @@ export function buildOtpCard(code, remainingSeconds, userId, keyName) {
               horizontal_spacing: "8px",
               vertical_spacing: "8px",
               horizontal_align: "left",
-              vertical_align: "top",
+              vertical_align: "center",
               margin: "0px 0px 0px 0px",
             },
             {
@@ -355,7 +367,7 @@ export function buildOtpCard(code, remainingSeconds, userId, keyName) {
               elements: [
                 personElement(userId),
               ],
-              vertical_align: "top",
+              vertical_align: "center",
             },
           ],
           margin: "0px 0px 0px 0px",

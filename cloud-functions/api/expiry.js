@@ -139,6 +139,7 @@ function buildOtpCard(code, remainingSeconds, userId, keyName) {
           tag: "column_set",
           horizontal_spacing: "8px",
           horizontal_align: "left",
+          vertical_align: "center",
           columns: [
             {
               tag: "column",
@@ -149,7 +150,7 @@ function buildOtpCard(code, remainingSeconds, userId, keyName) {
                   content: "数据获取人：",
                   text_align: "left",
                   text_size: "heading",
-                  margin: "3px 0px 0px 0px",
+                  margin: "0px 0px 0px 0px",
                 },
               ],
               padding: "0px 0px 0px 0px",
@@ -157,7 +158,7 @@ function buildOtpCard(code, remainingSeconds, userId, keyName) {
               horizontal_spacing: "8px",
               vertical_spacing: "8px",
               horizontal_align: "left",
-              vertical_align: "top",
+              vertical_align: "center",
               margin: "0px 0px 0px 0px",
             },
             {
@@ -166,7 +167,7 @@ function buildOtpCard(code, remainingSeconds, userId, keyName) {
               elements: [
                 personElement(userId),
               ],
-              vertical_align: "top",
+              vertical_align: "center",
             },
           ],
           margin: "0px 0px 0px 0px",
@@ -237,6 +238,7 @@ function buildExpiredCard(userId, keyName) {
           tag: "column_set",
           horizontal_spacing: "8px",
           horizontal_align: "left",
+          vertical_align: "center",
           columns: [
             {
               tag: "column",
@@ -247,7 +249,7 @@ function buildExpiredCard(userId, keyName) {
                   content: "数据获取人：",
                   text_align: "left",
                   text_size: "heading",
-                  margin: "3px 0px 0px 0px",
+                  margin: "0px 0px 0px 0px",
                 },
               ],
               padding: "0px 0px 0px 0px",
@@ -255,7 +257,7 @@ function buildExpiredCard(userId, keyName) {
               horizontal_spacing: "8px",
               vertical_spacing: "8px",
               horizontal_align: "left",
-              vertical_align: "top",
+              vertical_align: "center",
               margin: "0px 0px 0px 0px",
             },
             {
@@ -264,7 +266,7 @@ function buildExpiredCard(userId, keyName) {
               elements: [
                 personElement(userId),
               ],
-              vertical_align: "top",
+              vertical_align: "center",
             },
           ],
           margin: "0px 0px 0px 0px",

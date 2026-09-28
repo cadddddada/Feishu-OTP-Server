@@ -20,6 +20,7 @@ import {
     generateNewOtp,
     getTenantAccessToken,
     json,
+    kvDelete,
     kvGet,
     kvPut,
     personElement,
@@ -104,17 +105,20 @@ function sendHelp(env, receiveId) {
     return sendTextMessage(
         env,
         receiveId,
-        "发送\u201Cxxx TOTP\u201D或\u201Cxxx密钥\u201D获取动态密码，例如\u201C阿里云 TOTP\u201D。\n添加密钥：私聊发送\u201C添加密钥 XXX <密钥>\u201D，例如\u201C添加密钥 阿里云 JBSWY3DPEHPK3PXP\u201D。\n更新密钥：私聊发送\u201C更新密钥 XXX <密钥>\u201D；也可点击机器人自定义菜单「添加密钥」自助添加。"
+        "发送\u201Cxxx TOTP\u201D或\u201Cxxx密钥\u201D获取动态密码，例如\u201C阿里云 TOTP\u201D。\n添加密钥：私聊发送\u201C添加密钥 XXX <密钥>\u201D，例如\u201C添加密钥 阿里云 JBSWY3DPEHPK3PXP\u201D。\n更新密钥：私聊发送\u201C更新密钥 XXX <新密钥> <密码>\u201D；删除密钥：私聊发送\u201C删除密钥 XXX <密码>\u201D。\n也可点击机器人自定义菜单「添加密钥」自助添加。"
     );
 }
 
 // ==================== 卡片构建 ====================
-// 通知卡片行样式：左标签 + 右内容（管理群通知与自助添加结果卡片共用）
-function row(label, content) {
+// 通知卡片行样式：左标签 + 右内容（管理群通知 / 审计日志 / 自助添加结果卡片共用）
+// options.align = "center"：人员胶囊等需要与左侧标签垂直居中的内容
+function row(label, content, options = {}) {
+    const align = options.align || "top";
     return {
         tag: "column_set",
         horizontal_spacing: "8px",
         horizontal_align: "left",
+        vertical_align: align,
         columns: [
             {
                 tag: "column",
@@ -125,7 +129,7 @@ function row(label, content) {
                         content: label,
                         text_align: "left",
                         text_size: "heading",
-                        margin: "3px 0px 0px 0px",
+                        margin: align === "center" ? "0px 0px 0px 0px" : "3px 0px 0px 0px",
                     },
                 ],
                 padding: "0px 0px 0px 0px",
@@ -133,14 +137,14 @@ function row(label, content) {
                 horizontal_spacing: "8px",
                 vertical_spacing: "8px",
                 horizontal_align: "left",
-                vertical_align: "top",
+                vertical_align: align,
                 margin: "0px 0px 0px 0px",
             },
             {
                 tag: "column",
                 width: "auto",
                 elements: [content],
-                vertical_align: "top",
+                vertical_align: align,
             },
         ],
         margin: "0px 0px 0px 0px",
@@ -154,7 +158,7 @@ function buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay) {
         body: {
             direction: "vertical",
             elements: [
-                row("数据获取人：", personElement(userId)),
+                row("数据获取人：", personElement(userId), {align: "center"}),
                 row("获取密钥：", {
                     tag: "markdown",
                     content: keyDisplay,
@@ -231,6 +235,62 @@ async function sendManagementCard(
             card: buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay),
         }),
     });
+}
+
+// ==================== 密钥操作审计通知（Webhook） ====================
+// 新建 / 更新 / 删除成功后推送一条审计卡片到管理群，作为审计日志
+const AUDIT_TEMPLATES = {新建: "green", 更新: "orange", 删除: "red"};
+
+function buildAuditCard(action, keyName, userId, timeStr, source) {
+    const value = (content) => ({
+        tag: "markdown",
+        content,
+        text_align: "left",
+        text_size: "normal",
+        margin: "2px 0px 0px 0px",
+    });
+    return {
+        schema: "2.0",
+        config: {update_multi: true},
+        body: {
+            direction: "vertical",
+            elements: [
+                row("操作人：", personElement(userId), {align: "center"}),
+                row("操作类型：", value(action)),
+                row("密钥名称：", value(keyName)),
+                row("操作时间：", value(timeStr)),
+                row("操作来源：", value(source)),
+            ],
+        },
+        header: {
+            title: {tag: "plain_text", content: "TOTP密钥审计日志"},
+            subtitle: {tag: "plain_text", content: ""},
+            template: AUDIT_TEMPLATES[action] || "blue",
+            padding: "12px 8px 12px 8px",
+        },
+    };
+}
+
+async function sendAuditNotification(env, action, keyName, userId, source) {
+    const webhook = env.MANAGEMENT_WEBHOOK || "";
+    if (!webhook) {
+        console.log(`[AUDIT] 未配置 MANAGEMENT_WEBHOOK，跳过 ${action} ${keyName}`);
+        return;
+    }
+    try {
+        const timeStr = formatTime(Math.floor(Date.now() / 1000));
+        await fetch(webhook, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                msg_type: "interactive",
+                card: buildAuditCard(action, keyName, userId, timeStr, source),
+            }),
+        });
+        console.log(`[AUDIT] ${action} ${keyName} by ${userId || "unknown"}（${source}）`);
+    } catch (e) {
+        console.error(`[AUDIT] 审计通知失败: ${e}`);
+    }
 }
 
 // ==================== 自助添加密钥卡片 ====================
@@ -314,7 +374,7 @@ function buildSavedCard(keyName, timeStr, userId = null, saved = true) {
         }),
     ];
     if (userId) {
-        elements.push(row("添加人：", personElement(userId)));
+        elements.push(row("添加人：", personElement(userId), {align: "center"}));
     }
     elements.push({
         tag: "markdown",
@@ -597,24 +657,53 @@ async function sendOtpForKey(env, context, userId, keyName) {
 }
 
 // 密钥指令（仅私聊）：添加密钥（仅新增，已存在不覆盖）/ 更新密钥（仅更新，不存在不新建）
+// 密钥指令（仅私聊）：
+//   添加密钥 XXX <密钥>            仅新增，已存在不覆盖
+//   更新密钥 XXX <新密钥> <密码>    仅更新，需操作密码 env.TOTP_ADMIN_PASSWORD
+//   删除密钥 XXX <密码>            删除，需操作密码 env.TOTP_ADMIN_PASSWORD
 async function handleSecretCommand(env, text, userId, chatType = "") {
     const t = String(text || "").trim();
-    const isAdd = t.startsWith("添加密钥");
-    const isUpdate = t.startsWith("更新密钥");
-    if (!isAdd && !isUpdate) return false;
+    const cmd = ["添加密钥", "更新密钥", "删除密钥"].find((c) => t === c || t.startsWith(`${c} `));
+    if (!cmd) return false;
     if (chatType && chatType !== "p2p") {
         await sendTextMessage(env, userId, "密钥管理仅支持在私聊中使用。");
         return true;
     }
-    const cmd = isAdd ? "添加密钥" : "更新密钥";
-    const example = `${cmd} 阿里云 JBSWY3DPEHPK3PXP`;
-    if (t === cmd || new RegExp(`^${cmd}\\s+\\S+\\s*$`).test(t)) {
-        await sendTextMessage(env, userId, `格式：${cmd} XXX <密钥>，例如：${example}`);
+    const isAdd = cmd === "添加密钥";
+    const isUpdate = cmd === "更新密钥";
+    const usage = isAdd
+        ? `${cmd} XXX <密钥>`
+        : isUpdate
+            ? `${cmd} XXX <新密钥> <密码>`
+            : `${cmd} XXX <密码>`;
+    const example = isAdd
+        ? `${cmd} 阿里云 JBSWY3DPEHPK3PXP`
+        : isUpdate
+            ? `${cmd} 阿里云 JBSWY3DPEHPK3PXP <密码>`
+            : `${cmd} 阿里云 <密码>`;
+    const parts = t.slice(cmd.length).trim().split(/\s+/).filter(Boolean);
+    if (parts.length !== (isUpdate ? 3 : 2)) {
+        await sendTextMessage(env, userId, `格式：${usage}，例如：${example}`);
         return true;
     }
-    const m = t.match(new RegExp(`^${cmd}\\s+(\\S+)\\s+(\\S+)\\s*$`));
-    if (!m) return false;
-    const keyName = normalizeIdentifier(m[1]);
+
+    // 更新/删除需要操作密码；系统未配置密码时一律禁止
+    if (!isAdd) {
+        const opPassword = String(env.TOTP_ADMIN_PASSWORD || "");
+        const inputPassword = isUpdate ? parts[2] : parts[1];
+        if (!opPassword) {
+            console.log("[SECRET] 未配置 TOTP_ADMIN_PASSWORD，拒绝更新/删除");
+            await sendTextMessage(env, userId, "系统未配置操作密码（TOTP_ADMIN_PASSWORD），已禁止更新/删除密钥。");
+            return true;
+        }
+        if (!safeEqual(inputPassword, opPassword)) {
+            console.log(`[SECRET] 操作密码错误，拒绝 ${cmd}`);
+            await sendTextMessage(env, userId, "操作密码错误，已拒绝执行。");
+            return true;
+        }
+    }
+
+    const keyName = normalizeIdentifier(parts[0]);
     if (!keyName) {
         await sendTextMessage(env, userId, "标识符无效（需包含中文、字母或数字），请检查后重试。");
         return true;
@@ -624,7 +713,28 @@ async function handleSecretCommand(env, text, userId, chatType = "") {
         return true;
     }
     const kvKey = `${keyName}_TOTP_SECRET`;
-    const parsed = parseSecretInput(m[2]);
+    const exists = Boolean(await kvGet(kvKey, ""));
+    if (isAdd && exists) {
+        await sendTextMessage(env, userId, `标识符 ${keyName} 已存在，未添加。如需更新请发送\u201C更新密钥 ${keyName} <新密钥> <密码>\u201D。`);
+        return true;
+    }
+    if (!isAdd && !exists) {
+        await sendTextMessage(env, userId, `标识符 ${keyName} 不存在，请先发送\u201C添加密钥 ${keyName} <密钥>\u201D添加。`);
+        return true;
+    }
+
+    // 删除：密码校验通过后直接删除
+    if (cmd === "删除密钥") {
+        if (!(await kvDelete(kvKey))) {
+            await sendTextMessage(env, userId, "密钥删除失败，请稍后重试。");
+            return true;
+        }
+        await sendAuditNotification(env, "删除", keyName, userId, "私聊命令");
+        await sendTextMessage(env, userId, `已删除密钥 ${keyName}（存储键：${kvKey}）。`);
+        return true;
+    }
+
+    const parsed = parseSecretInput(parts[1]);
     if (parsed.error) {
         await sendTextMessage(env, userId, `${parsed.error}。示例：${example}`);
         return true;
@@ -635,19 +745,11 @@ async function handleSecretCommand(env, text, userId, chatType = "") {
         await sendTextMessage(env, userId, `密钥格式无效（需要 base32 格式），请检查后重试。示例：${example}`);
         return true;
     }
-    const exists = Boolean(await kvGet(kvKey, ""));
-    if (isAdd && exists) {
-        await sendTextMessage(env, userId, `标识符 ${keyName} 已存在，未添加。如需更新请发送\u201C更新密钥 ${keyName} <密钥>\u201D。`);
-        return true;
-    }
-    if (isUpdate && !exists) {
-        await sendTextMessage(env, userId, `标识符 ${keyName} 不存在，请先发送\u201C添加密钥 ${keyName} <密钥>\u201D添加。`);
-        return true;
-    }
     if (!(await kvPut(kvKey, parsed.secret))) {
         await sendTextMessage(env, userId, "密钥保存失败，请稍后重试。");
         return true;
     }
+    await sendAuditNotification(env, isAdd ? "新建" : "更新", keyName, userId, "私聊命令");
     await sendTextMessage(
         env,
         userId,
@@ -659,7 +761,7 @@ async function handleSecretCommand(env, text, userId, chatType = "") {
 // ==================== 卡片回调（card.action.trigger） ====================
 // 表单提交：标识符规范化（中文转拼音、统一大写）+ 密钥/otpauth 解析 + 写 KV，
 // 响应体直接返回更新后的卡片（3 秒内同步响应）
-async function handleCardAction(env, eventData) {
+async function handleCardAction(env, context, eventData) {
     const event = eventData.event || {};
     const action = event.action || {};
     const operator = event.operator || {};
@@ -667,12 +769,12 @@ async function handleCardAction(env, eventData) {
     const formValue = action.form_value;
     console.log(`[CARD] 收到卡片交互 tag=${action.tag || ""} name=${action.name || ""}`);
     if (action.tag === "button" && formValue && typeof formValue === "object") {
-        return await handleAddTotpSubmit(env, formValue, userId);
+        return await handleAddTotpSubmit(env, formValue, userId, context);
     }
     return {toast: {type: "info", content: "暂不支持的操作"}};
 }
 
-async function handleAddTotpSubmit(env, formValue, userId = null) {
+async function handleAddTotpSubmit(env, formValue, userId = null, context = null) {
     const values = formValue && typeof formValue === "object" ? formValue : {};
     const identifierRaw = String(values.identifier ?? "").trim();
     const parsed = parseSecretInput(values.secret);
@@ -710,6 +812,13 @@ async function handleAddTotpSubmit(env, formValue, userId = null) {
         return {toast: {type: "error", content: "密钥保存失败，请稍后重试"}};
     }
     console.log(`[CARD] 自助添加密钥成功: ${kvKey}`);
+    // 审计通知不阻塞卡片回调（3 秒内必须响应）：有 waitUntil 时交给运行时托管
+    const auditTask = sendAuditNotification(env, "新建", keyName, userId, "菜单自助添加");
+    if (context && typeof context.waitUntil === "function") {
+        context.waitUntil(auditTask);
+    } else {
+        await auditTask;
+    }
     return {
         toast: {type: "success", content: "已保存"},
         card: {type: "raw", data: buildSavedCard(keyName, timeStr, userId)},
@@ -799,7 +908,7 @@ export default async function onRequest(context) {
     if (eventData.type === "card.action.trigger") {
         let view;
         try {
-            view = await handleCardAction(env, eventData);
+            view = await handleCardAction(env, context, eventData);
         } catch (e) {
             console.error(`[ERROR] 卡片回调处理失败: ${e}`);
             view = {toast: {type: "error", content: "处理失败，请稍后重试"}};
