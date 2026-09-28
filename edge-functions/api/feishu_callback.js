@@ -106,7 +106,7 @@ function sendHelp(env, receiveId) {
     return sendTextMessage(
         env,
         receiveId,
-        "发送「xxx令牌」获取动态令牌，例如「阿里云令牌」；\n添加令牌：私聊发送「添加令牌 XXX <密钥>」，例如「添加令牌 阿里云 JBSWY3DPEHPK3PXP」；\n更新令牌：私聊发送「更新令牌 XXX <新密钥> <密码>」；删除令牌：私聊发送「删除令牌 XXX <密码>」；\n也可点击机器人自定义菜单「添加令牌」自助添加"
+        "发送「xxx 令牌」获取动态令牌，例如「阿里云令牌」；\n添加令牌：私聊发送「添加令牌 XXX <密钥>」，例如「添加令牌 阿里云 JBSWY3DPEHPK3PXP」；\n更新令牌：私聊发送「更新令牌 XXX <新密钥> <密码>」；删除令牌：私聊发送「删除令牌 XXX <密码>」；\n也可点击机器人自定义菜单「添加令牌」自助添加"
     );
 }
 
@@ -320,7 +320,7 @@ function buildSavedCard(keyName, timeStr, userId = null, saved = true) {
     elements.push({
         tag: "markdown",
         content: saved
-            ? `发送「${keyName}令牌」即可获取动态令牌`
+            ? `发送「${keyName} 令牌」即可获取动态令牌`
             : `标识符 ${keyName} 已被占用，本次未保存；如需更新请发送「更新令牌 ${keyName} <密钥> <密码>」；如需删除请发送「删除令牌 ${keyName} <密码>」`,
         text_size: "normal",
         margin: "8px 0px 0px 0px",
@@ -514,7 +514,7 @@ async function handleMessageEvent(env, context, eventData) {
             return;
         }
 
-        // 解析多令牌格式: xxx令牌（兼容 xxxTOTP / xxx验证码 / xxx密钥 / xxx动态码）
+        // 解析多令牌格式: xxx 令牌（兼容 xxx TOTP / xxx 验证码 / xxx 密钥 / xxx 动态码）
         const keyPrefix = parseOtpKey(text);
         if (keyPrefix !== null) {
             const keyName = keyPrefix ? normalizeIdentifier(keyPrefix) || null : null;
@@ -713,13 +713,13 @@ async function handleSecretCommand(env, text, userId, chatType = "") {
     await sendTextMessage(
         env,
         userId,
-        `已${isAdd ? "添加" : "更新"}令牌 ${keyName}（存储键：${kvKey}）；发送「${keyName}令牌」即可获取动态令牌`
+        `已${isAdd ? "添加" : "更新"}令牌 ${keyName}（存储键：${kvKey}）；发送「${keyName} 令牌」即可获取动态令牌`
     );
     return true;
 }
 
 // ==================== 卡片回调（card.action.trigger） ====================
-// 表单提交：标识符规范化（中文转拼音、统一大写）+ 令牌/otpauth 解析 + 写 KV，
+// 表单提交：标识符规范化（中文转拼音、统一大写）+ 密钥/otpauth 解析 + 写 KV，
 // 响应体直接返回更新后的卡片（3 秒内同步响应）
 async function handleCardAction(env, context, eventData) {
     const event = eventData.event || {};

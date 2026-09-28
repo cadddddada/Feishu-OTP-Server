@@ -29,7 +29,7 @@ Cloud Function /api/expiry (scheduled HTTP sender, direct to Feishu)
 
 ## Key Features
 
-- **TOTP Generation and Query**: Send "xxx令牌" to get a dynamic token, e.g. "阿里云令牌" (compatible with TOTP / 验证码 / 密钥 / 动态码)
+- **TOTP Generation and Query**: Send "xxx 令牌" to get a dynamic token, e.g. "阿里云令牌" (compatible with TOTP / 验证码 / 密钥 / 动态码)
 - **Key management (private-chat commands)**: `添加令牌 XXX <secret/otpauth link>` creates only (refused when it already exists); `更新令牌 XXX <new secret> <password>` updates only; `删除令牌 XXX <password>` deletes the key. Update/delete require `TOTP_ADMIN_PASSWORD` in the environment; when it is not configured they are refused entirely
 - **Custom menu events**: A bot custom-menu item's event ID is used directly as the key identifier, so a click pushes the TOTP card (event ID `YUNPAN` -> reads `YUNPAN_TOTP_SECRET`)
 - **Self-service add-key from the menu**: The `ADD_TOTP` event ID pushes a form card; the user fills in an identifier and a secret/otpauth link, the backend converts Chinese to pinyin and uppercases the letters before writing KV, and the result card shows three rows "令牌名称 / 添加时间 / 添加人" (no "已保存" wording — the header carries the status); when the identifier already exists nothing is written and the header becomes "TOTP令牌未保存" with an update hint
@@ -91,7 +91,7 @@ feishu-otp-server/
 Every Feishu callback hits the same URL `https://[domain]/api/feishu_callback`, goes through shared validation, and is then routed by event type.
 
 1. **Shared validation**: GET health check; `url_verification` challenge echo; Token check (2.0 events use `header.token`); `x-lark-signature` verification (SHA-256 over `timestamp + nonce + FEISHU_ENCRYPT_KEY + body`); AES-CBC decryption of the `encrypt` field when `FEISHU_ENCRYPT_KEY` is set; message timeliness check.
-2. **Message event `im.message.receive_v1`**: `添加令牌 XXX <secret>` creates only (refused when it already exists); `更新令牌 XXX <new secret> <password>` updates only (refused when it does not exist or the password is wrong); `删除令牌 XXX <password>` deletes (refused when it does not exist or the password is wrong); `xxx令牌` (compatible with `xxxTOTP` / `xxx验证码` / `xxx密钥` / `xxx动态码`) reads KV and builds the TOTP card; anything else returns the help text.
+2. **Message event `im.message.receive_v1`**: `添加令牌 XXX <secret>` creates only (refused when it already exists); `更新令牌 XXX <new secret> <password>` updates only (refused when it does not exist or the password is wrong); `删除令牌 XXX <password>` deletes (refused when it does not exist or the password is wrong); `xxx 令牌` (compatible with `xxx TOTP` / `xxx 验证码` / `xxx 密钥` / `xxx 动态码`) reads KV and builds the TOTP card; anything else returns the help text.
 3. **Custom menu event `application.bot.menu_v6`**: `event_key` is the key identifier and reuses the TOTP card flow; `ADD_TOTP` pushes the self-service add-key form card.
 4. **Card callback `card.action.trigger`**: form submits are handled synchronously (response within 3 s); on success it replies `{toast, card:{type:'raw', data}}` and shows three rows "令牌名称 / 添加时间 / 添加人"; when the identifier already exists nothing is written and the header shows "TOTP令牌未保存" with an update hint; on validation failure it replies only an error Toast (the audit notification is dispatched via `context.waitUntil`, so it never eats into the 3 s window).
 5. **Unified audit**: after a successful read (TOTP fetch) / create / update / delete, a "TOTP令牌审计日志" card is pushed to `MANAGEMENT_WEBHOOK` (operator / action / key name / time / [expiry — read only] / source); failed or rejected operations are not pushed.
@@ -109,7 +109,7 @@ Every Feishu callback hits the same URL `https://[domain]/api/feishu_callback`, 
 - The secret must be base32-decodable before it is written; `ADD_TOTP` is a reserved identifier (normalized to `ADDTOTP`) and cannot be used as a key name.
 - No overwrite: "添加令牌" and the menu self-service add are both refused for an existing identifier (they point to "更新令牌"), and only "更新令牌" overwrites the stored value; when the menu add hits an existing identifier the header shows "TOTP令牌未保存".
 - Update/delete require the operation password in `TOTP_ADMIN_PASSWORD`; when it is unset they are disallowed entirely, and a wrong password is always rejected (constant-time comparison).
-- The `xxx令牌` query command (compatible with `xxxTOTP` / `xxx验证码` / `xxx密钥` / `xxx动态码`) and the menu event ID share one identifier namespace.
+- The `xxx 令牌` query command (compatible with `xxx TOTP` / `xxx 验证码` / `xxx 密钥` / `xxx 动态码`) and the menu event ID share one identifier namespace.
 - Recycle bin: overwritten / deleted keys are appended to the KV entry `TOTP_RECYCLE_BIN` with `key` (original storage key) / `value` (old value) / `deletedAt` (ms timestamp) / `operatorId` (open_id) / `action` (overwrite or delete); every write first prunes entries older than 90 days (lazy cleanup), and the list can be inspected or restored straight from the KV console.
 - Secrets are never cached: every OTP generation reads KV in real time.
 
