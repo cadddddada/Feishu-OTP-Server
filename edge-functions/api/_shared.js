@@ -404,7 +404,7 @@ export function buildOtpCard(code, remainingSeconds, userId, keyName) {
     header: {
       title: {
         tag: "plain_text",
-        content: keyName ? `${keyName} TOTP密钥` : "TOTP密钥",
+        content: keyName ? `${keyName} TOTP令牌` : "TOTP令牌",
       },
       subtitle: { tag: "plain_text", content: "" },
       text_tag_list: [
@@ -420,7 +420,7 @@ export function buildOtpCard(code, remainingSeconds, userId, keyName) {
   };
 }
 
-// OTP 续期：重新生成当前窗口密钥并 PATCH 到用户卡片（由 Cloud 定时触发）
+// OTP 续期：重新生成当前窗口令牌并 PATCH 到用户卡片（由 Cloud 定时触发）
 // ---------- 统一响应 ----------
 export function json(data, status = 200, headers = {}) {
   const h = {

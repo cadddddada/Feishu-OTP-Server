@@ -177,7 +177,7 @@ function buildOtpCard(code, remainingSeconds, userId, keyName) {
     header: {
       title: {
         tag: "plain_text",
-        content: keyName ? `${keyName} TOTP密钥` : "TOTP密钥",
+        content: keyName ? `${keyName} TOTP令牌` : "TOTP令牌",
       },
       subtitle: { tag: "plain_text", content: "" },
       text_tag_list: [
@@ -276,7 +276,7 @@ function buildExpiredCard(userId, keyName) {
     header: {
       title: {
         tag: "plain_text",
-        content: keyName ? `${keyName} TOTP密钥` : "TOTP密钥",
+        content: keyName ? `${keyName} TOTP令牌` : "TOTP令牌",
       },
       subtitle: { tag: "plain_text", content: "" },
       text_tag_list: [

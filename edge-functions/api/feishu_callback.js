@@ -1,12 +1,12 @@
 // ============================================================================
-// EdgeOne Makers Edge Function：飞书 OTP 动态密钥查询机器人（回调入口）
+// EdgeOne Makers Edge Function：飞书 OTP 动态令牌查询机器人（回调入口）
 // 路由：/api/feishu_callback（由文件路径 edge-functions/api/feishu_callback.js 决定）
 //
 // 职责：
 //   1. 接收飞书事件回调：URL 验证 / Token 校验 / 签名校验 / AES 解密 / 时效校验
-//   2. 处理消息：获取 OTP、私聊添加/更新密钥、发送文本与卡片、管理群通知
-//   3. KV 直读直写（绑定变量 KV_NAMESPACE，命名空间 TOTP_SERVER），密钥不缓存
-//   4. 发送 OTP 卡片后，把过期更新所需数据（message_id / 剩余秒数 / 用户 / 密钥名）
+//   2. 处理消息：获取 OTP、私聊添加/更新令牌、发送文本与卡片、管理群通知
+//   3. KV 直读直写（绑定变量 KV_NAMESPACE，命名空间 TOTP_SERVER），令牌不缓存
+//   4. 发送 OTP 卡片后，把过期更新所需数据（message_id / 剩余秒数 / 用户 / 令牌名）
 //      通过 HTTP 转交 Cloud Function（/api/expiry），由云函数到点后置卡片为已失效
 //
 // 依赖：pinyin-pro（npm beta，纯 JS）；TOTP / AES / SHA 使用 Web Crypto
@@ -41,7 +41,7 @@ function chineseToPinyin(text) {
     }
 }
 
-// ==================== 密钥标识符规范化 ====================
+// ==================== 令牌标识符规范化 ====================
 // 规则：中文转拼音、英文字母统一大写、剔除空格与符号
 // 例："阿里云" / "ali yun" / "ali-yun" -> "ALIYUN"
 const ADD_TOTP_EVENT_KEY = "ADD_TOTP";
@@ -106,20 +106,19 @@ function sendHelp(env, receiveId) {
     return sendTextMessage(
         env,
         receiveId,
-        "发送\u201Cxxx TOTP\u201D或\u201Cxxx密钥\u201D获取动态密码，例如\u201C阿里云 TOTP\u201D。\n添加密钥：私聊发送\u201C添加密钥 XXX <密钥>\u201D，例如\u201C添加密钥 阿里云 JBSWY3DPEHPK3PXP\u201D。\n更新密钥：私聊发送\u201C更新密钥 XXX <新密钥> <密码>\u201D；删除密钥：私聊发送\u201C删除密钥 XXX <密码>\u201D。\n也可点击机器人自定义菜单「添加密钥」自助添加。"
+        "发送「xxx令牌」获取动态令牌，例如「阿里云令牌」；\n添加令牌：私聊发送「添加令牌 XXX <密钥>」，例如「添加令牌 阿里云 JBSWY3DPEHPK3PXP」；\n更新令牌：私聊发送「更新令牌 XXX <新密钥> <密码>」；删除令牌：私聊发送「删除令牌 XXX <密码>」；\n也可点击机器人自定义菜单「添加令牌」自助添加"
     );
 }
 
 // ==================== 卡片构建 ====================
-// 通知卡片行样式：左标签 + 右内容（管理群通知 / 审计日志 / 自助添加结果卡片共用）
-// options.align = "center"：人员胶囊等需要与左侧标签垂直居中的内容
-function row(label, content, options = {}) {
-    const align = options.align || "top";
+// 通知卡片行样式：左标签 + 右内容，两侧统一垂直居中（审计日志与自助添加结果卡片共用）
+// 标签与内容的内外边距一律归零，避免不同 text_size 下靠 margin 补偿导致的错位
+function row(label, content) {
     return {
         tag: "column_set",
         horizontal_spacing: "8px",
         horizontal_align: "left",
-        vertical_align: align,
+        vertical_align: "center",
         columns: [
             {
                 tag: "column",
@@ -130,7 +129,7 @@ function row(label, content, options = {}) {
                         content: label,
                         text_align: "left",
                         text_size: "heading",
-                        margin: align === "center" ? "0px 0px 0px 0px" : "3px 0px 0px 0px",
+                        margin: "0px 0px 0px 0px",
                     },
                 ],
                 padding: "0px 0px 0px 0px",
@@ -138,14 +137,14 @@ function row(label, content, options = {}) {
                 horizontal_spacing: "8px",
                 vertical_spacing: "8px",
                 horizontal_align: "left",
-                vertical_align: align,
+                vertical_align: "center",
                 margin: "0px 0px 0px 0px",
             },
             {
                 tag: "column",
                 width: "auto",
                 elements: [content],
-                vertical_align: align,
+                vertical_align: "center",
             },
         ],
         margin: "0px 0px 0px 0px",
@@ -178,7 +177,7 @@ async function sendOtpCard(env, receiveId, code, remainingSeconds, userId, keyNa
     );
 }
 
-// ==================== 密钥操作审计通知（Webhook） ====================
+// ==================== 令牌操作审计通知（Webhook） ====================
 // 读取（获取 TOTP）/ 新建 / 更新 / 删除成功后推送一张审计卡片到管理群，统一作为审计日志
 const AUDIT_TEMPLATES = {读取: "blue", 新建: "green", 更新: "orange", 删除: "red"};
 
@@ -188,12 +187,12 @@ function buildAuditCard(action, keyName, userId, timeStr, source, expireTimeStr 
         content,
         text_align: "left",
         text_size: "normal",
-        margin: "2px 0px 0px 0px",
+        margin: "0px 0px 0px 0px",
     });
     const elements = [
-        row("操作人：", personElement(userId), {align: "center"}),
+        row("操作人：", personElement(userId)),
         row("操作类型：", value(action)),
-        row("密钥名称：", value(keyName)),
+        row("令牌名称：", value(keyName)),
         row("操作时间：", value(timeStr)),
     ];
     if (expireTimeStr) {
@@ -205,7 +204,7 @@ function buildAuditCard(action, keyName, userId, timeStr, source, expireTimeStr 
         config: {update_multi: true},
         body: {direction: "vertical", elements},
         header: {
-            title: {tag: "plain_text", content: "TOTP密钥审计日志"},
+            title: {tag: "plain_text", content: "TOTP令牌审计日志"},
             subtitle: {tag: "plain_text", content: ""},
             template: AUDIT_TEMPLATES[action] || "blue",
             padding: "12px 8px 12px 8px",
@@ -235,7 +234,7 @@ async function sendAuditNotification(env, action, keyName, userId, source, expir
     }
 }
 
-// ==================== 自助添加密钥卡片 ====================
+// ==================== 自助添加令牌卡片 ====================
 // 菜单事件 ADD_TOTP 触发的表单卡片（卡片 JSON 2.0，form 必须直接挂在 body 下）
 function buildAddTotpCard() {
     return {
@@ -246,7 +245,7 @@ function buildAddTotpCard() {
             elements: [
                 {
                     tag: "markdown",
-                    content: "填写密钥标识符与密钥，点击「保存」提交",
+                    content: "填写令牌标识符与密钥，点击「保存」提交",
                     text_size: "normal",
                     margin: "0px 0px 0px 0px",
                 },
@@ -258,7 +257,7 @@ function buildAddTotpCard() {
                         {
                             tag: "input",
                             name: "identifier",
-                            label: {tag: "plain_text", content: "密钥标识符"},
+                            label: {tag: "plain_text", content: "令牌标识符"},
                             placeholder: {tag: "plain_text", content: ""},
                             required: true,
                             input_type: "text",
@@ -290,7 +289,7 @@ function buildAddTotpCard() {
             ],
         },
         header: {
-            title: {tag: "plain_text", content: "添加TOTP密钥"},
+            title: {tag: "plain_text", content: "添加TOTP令牌"},
             subtitle: {tag: "plain_text", content: ""},
             template: "blue",
             padding: "12px 8px 12px 8px",
@@ -300,29 +299,29 @@ function buildAddTotpCard() {
 
 function buildSavedCard(keyName, timeStr, userId = null, saved = true) {
     const elements = [
-        row("密钥名称：", {
+        row("令牌名称：", {
             tag: "markdown",
             content: keyName,
             text_align: "left",
             text_size: "normal",
-            margin: "2px 0px 0px 0px",
+            margin: "0px 0px 0px 0px",
         }),
         row("添加时间：", {
             tag: "markdown",
             content: timeStr,
             text_align: "left",
             text_size: "normal",
-            margin: "2px 0px 0px 0px",
+            margin: "0px 0px 0px 0px",
         }),
     ];
     if (userId) {
-        elements.push(row("添加人：", personElement(userId), {align: "center"}));
+        elements.push(row("添加人：", personElement(userId)));
     }
     elements.push({
         tag: "markdown",
         content: saved
-            ? `发送「${keyName} TOTP」即可获取动态密码。`
-            : `标识符 ${keyName} 已被占用，本次未保存；如需更新请发送「更新密钥 ${keyName} <密钥> <密码>」；如需删除请发送「删除密钥 ${keyName} <密码>」。`,
+            ? `发送「${keyName}令牌」即可获取动态令牌`
+            : `标识符 ${keyName} 已被占用，本次未保存；如需更新请发送「更新令牌 ${keyName} <密钥> <密码>」；如需删除请发送「删除令牌 ${keyName} <密码>」`,
         text_size: "normal",
         margin: "8px 0px 0px 0px",
     });
@@ -331,7 +330,7 @@ function buildSavedCard(keyName, timeStr, userId = null, saved = true) {
         config: {update_multi: true},
         body: {direction: "vertical", elements},
         header: {
-            title: {tag: "plain_text", content: saved ? "TOTP密钥已保存" : "TOTP密钥未保存"},
+            title: {tag: "plain_text", content: saved ? "TOTP令牌已保存" : "TOTP令牌未保存"},
             subtitle: {tag: "plain_text", content: ""},
             template: saved ? "green" : "orange",
             padding: "12px 8px 12px 8px",
@@ -458,8 +457,8 @@ async function handleEvent(env, context, eventData) {
     }
 }
 
-// 自定义菜单事件：事件 ID 即密钥标识符（菜单事件 ID = YUNPAN 时读取 YUNPAN_TOTP_SECRET）
-// 例外：事件 ID = ADD_TOTP 时推送自助添加密钥卡片
+// 自定义菜单事件：事件 ID 即令牌标识符（菜单事件 ID = YUNPAN 时读取 YUNPAN_TOTP_SECRET）
+// 例外：事件 ID = ADD_TOTP 时推送自助添加令牌卡片
 async function handleMenuEvent(env, context, eventData) {
     try {
         const event = eventData.event || {};
@@ -478,10 +477,10 @@ async function handleMenuEvent(env, context, eventData) {
         }
         if (RESERVED_KEY_NAMES.has(keyName)) {
             await sendInteractiveCard(env, userId, buildAddTotpCard());
-            console.log("[MENU] 已推送自助添加密钥卡片");
+            console.log("[MENU] 已推送自助添加令牌卡片");
             return;
         }
-        console.log(`[MENU] 菜单事件 ${eventKey} -> 密钥标识符 ${keyName}`);
+        console.log(`[MENU] 菜单事件 ${eventKey} -> 令牌标识符 ${keyName}`);
         await sendOtpForKey(env, context, userId, keyName, "自定义菜单");
     } catch (e) {
         console.error(`处理菜单事件出错: ${e}`);
@@ -510,12 +509,12 @@ async function handleMessageEvent(env, context, eventData) {
 
         const chatType = message.chat_type || "";
 
-        // 密钥指令：添加密钥（仅新增）/ 更新密钥（仅更新），仅私聊
+        // 令牌指令：添加令牌（仅新增）/ 更新令牌（仅更新），仅私聊
         if (await handleSecretCommand(env, text, userId, chatType)) {
             return;
         }
 
-        // 解析多密钥格式: xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码
+        // 解析多令牌格式: xxx令牌（兼容 xxxTOTP / xxx验证码 / xxx密钥 / xxx动态码）
         const keyPrefix = parseOtpKey(text);
         if (keyPrefix !== null) {
             const keyName = keyPrefix ? normalizeIdentifier(keyPrefix) || null : null;
@@ -536,12 +535,12 @@ async function sendOtpForKey(env, context, userId, keyName, source = "私聊命�
     const [{code, expireTs, keyName: resolvedName, nextCode}, tokenInfo] =
         await Promise.all([otpTask, tokenTask]);
     if (!code) {
-        await sendTextMessage(env, userId, "该动态验证码不存在，请检查");
+        await sendTextMessage(env, userId, `动态令牌「${keyName || "默认"}」不存在,请检查`);
         return false;
     }
 
     const remainingSeconds = Math.max(1, Math.floor(expireTs - Date.now() / 1000));
-    // 续期：首次密钥在 expireTs 过期，续期后的新密钥再保持一个 TOTP 周期（30 秒）
+    // 续期：首次令牌在 expireTs 过期，续期后的新令牌再保持一个 TOTP 周期（30 秒）
     const renewAt = expireTs * 1000;
     const expireAt = (expireTs + 30) * 1000;
     const finalExpireTimeStr = formatTime(expireTs + 30);
@@ -612,20 +611,20 @@ async function archiveSecret(kvKey, value, userId, action) {
     }
 }
 
-// 密钥指令（仅私聊）：
-//   添加密钥 XXX <密钥>            仅新增，已存在不覆盖
-//   更新密钥 XXX <新密钥> <密码>    仅更新，需操作密码 env.TOTP_ADMIN_PASSWORD
-//   删除密钥 XXX <密码>            删除，需操作密码 env.TOTP_ADMIN_PASSWORD
+// 令牌指令（仅私聊）：
+//   添加令牌 XXX <令牌>            仅新增，已存在不覆盖
+//   更新令牌 XXX <新令牌> <密码>    仅更新，需操作密码 env.TOTP_ADMIN_PASSWORD
+//   删除令牌 XXX <密码>            删除，需操作密码 env.TOTP_ADMIN_PASSWORD
 async function handleSecretCommand(env, text, userId, chatType = "") {
     const t = String(text || "").trim();
-    const cmd = ["添加密钥", "更新密钥", "删除密钥"].find((c) => t === c || t.startsWith(`${c} `));
+    const cmd = ["添加令牌", "更新令牌", "删除令牌"].find((c) => t === c || t.startsWith(`${c} `));
     if (!cmd) return false;
     if (chatType && chatType !== "p2p") {
-        await sendTextMessage(env, userId, "密钥管理仅支持在私聊中使用。");
+        await sendTextMessage(env, userId, "令牌管理仅支持在私聊中使用");
         return true;
     }
-    const isAdd = cmd === "添加密钥";
-    const isUpdate = cmd === "更新密钥";
+    const isAdd = cmd === "添加令牌";
+    const isUpdate = cmd === "更新令牌";
     const usage = isAdd
         ? `${cmd} XXX <密钥>`
         : isUpdate
@@ -648,62 +647,62 @@ async function handleSecretCommand(env, text, userId, chatType = "") {
         const inputPassword = isUpdate ? parts[2] : parts[1];
         if (!opPassword) {
             console.log("[SECRET] 未配置 TOTP_ADMIN_PASSWORD，拒绝更新/删除");
-            await sendTextMessage(env, userId, "系统未配置操作密码（TOTP_ADMIN_PASSWORD），已禁止更新/删除密钥。");
+            await sendTextMessage(env, userId, "系统未配置操作密码（TOTP_ADMIN_PASSWORD），已禁止更新/删除令牌");
             return true;
         }
         if (!safeEqual(inputPassword, opPassword)) {
             console.log(`[SECRET] 操作密码错误，拒绝 ${cmd}`);
-            await sendTextMessage(env, userId, "操作密码错误，已拒绝执行。");
+            await sendTextMessage(env, userId, "操作密码错误，已拒绝执行");
             return true;
         }
     }
 
     const keyName = normalizeIdentifier(parts[0]);
     if (!keyName) {
-        await sendTextMessage(env, userId, "标识符无效（需包含中文、字母或数字），请检查后重试。");
+        await sendTextMessage(env, userId, "标识符无效（需包含中文、字母或数字），请检查后重试");
         return true;
     }
     if (RESERVED_KEY_NAMES.has(keyName)) {
-        await sendTextMessage(env, userId, `标识符 ${ADD_TOTP_EVENT_KEY} 为系统保留字，请更换。`);
+        await sendTextMessage(env, userId, `标识符 ${ADD_TOTP_EVENT_KEY} 为系统保留字，请更换`);
         return true;
     }
     const kvKey = `${keyName}_TOTP_SECRET`;
     const oldValue = await kvGet(kvKey, "");
     const exists = Boolean(oldValue);
     if (isAdd && exists) {
-        await sendTextMessage(env, userId, `标识符 ${keyName} 已存在，未添加。如需更新请发送\u201C更新密钥 ${keyName} <新密钥> <密码>\u201D。`);
+        await sendTextMessage(env, userId, `标识符 ${keyName} 已存在，未添加；如需更新请发送「更新令牌 ${keyName} <新密钥> <密码>」`);
         return true;
     }
     if (!isAdd && !exists) {
-        await sendTextMessage(env, userId, `标识符 ${keyName} 不存在，请先发送\u201C添加密钥 ${keyName} <密钥>\u201D添加。`);
+        await sendTextMessage(env, userId, `标识符 ${keyName} 不存在，请先发送「添加令牌 ${keyName} <密钥>」添加`);
         return true;
     }
 
     // 删除：密码校验通过后直接删除
-    if (cmd === "删除密钥") {
+    if (cmd === "删除令牌") {
         if (!(await kvDelete(kvKey))) {
-            await sendTextMessage(env, userId, "密钥删除失败，请稍后重试。");
+            await sendTextMessage(env, userId, "密钥删除失败，请稍后重试");
             return true;
         }
         await archiveSecret(kvKey, oldValue, userId, "删除");
         await sendAuditNotification(env, "删除", keyName, userId, "私聊命令");
-        await sendTextMessage(env, userId, `已删除密钥 ${keyName}（存储键：${kvKey}）。`);
+        await sendTextMessage(env, userId, `已删除令牌 ${keyName}（存储键：${kvKey}）`);
         return true;
     }
 
     const parsed = parseSecretInput(parts[1]);
     if (parsed.error) {
-        await sendTextMessage(env, userId, `${parsed.error}。示例：${example}`);
+        await sendTextMessage(env, userId, `${parsed.error}；示例：${example}`);
         return true;
     }
     try {
         base32Decode(parsed.secret);
     } catch (e) {
-        await sendTextMessage(env, userId, `密钥格式无效（需要 base32 格式），请检查后重试。示例：${example}`);
+        await sendTextMessage(env, userId, `密钥格式无效（需要 base32 格式），请检查后重试；示例：${example}`);
         return true;
     }
     if (!(await kvPut(kvKey, parsed.secret))) {
-        await sendTextMessage(env, userId, "密钥保存失败，请稍后重试。");
+        await sendTextMessage(env, userId, "密钥保存失败，请稍后重试");
         return true;
     }
     if (!isAdd) {
@@ -714,13 +713,13 @@ async function handleSecretCommand(env, text, userId, chatType = "") {
     await sendTextMessage(
         env,
         userId,
-        `已${isAdd ? "添加" : "更新"}密钥 ${keyName}（存储键：${kvKey}）。发送\u201C${keyName} TOTP\u201D即可获取动态密码。`
+        `已${isAdd ? "添加" : "更新"}令牌 ${keyName}（存储键：${kvKey}）；发送「${keyName}令牌」即可获取动态令牌`
     );
     return true;
 }
 
 // ==================== 卡片回调（card.action.trigger） ====================
-// 表单提交：标识符规范化（中文转拼音、统一大写）+ 密钥/otpauth 解析 + 写 KV，
+// 表单提交：标识符规范化（中文转拼音、统一大写）+ 令牌/otpauth 解析 + 写 KV，
 // 响应体直接返回更新后的卡片（3 秒内同步响应）
 async function handleCardAction(env, context, eventData) {
     const event = eventData.event || {};
@@ -772,7 +771,7 @@ async function handleAddTotpSubmit(env, formValue, userId = null, context = null
     if (!(await kvPut(kvKey, parsed.secret))) {
         return {toast: {type: "error", content: "密钥保存失败，请稍后重试"}};
     }
-    console.log(`[CARD] 自助添加密钥成功: ${kvKey}`);
+    console.log(`[CARD] 自助添加令牌成功: ${kvKey}`);
     // 审计通知不阻塞卡片回调（3 秒内必须响应）：有 waitUntil 时交给运行时托管
     const auditTask = sendAuditNotification(env, "新建", keyName, userId, "菜单自助添加");
     if (context && typeof context.waitUntil === "function") {
@@ -788,12 +787,13 @@ async function handleAddTotpSubmit(env, formValue, userId = null, context = null
 
 function parseOtpKey(text) {
     const t = String(text || "").trim();
-    const m = t.match(/^(.+?)\s*(TOTP|OTP|验证码|密钥|动态码)$/i);
+    // 先判断"无标识符"的裸写法（TOTP 需先于 OTP 判断，避免被当成前缀 T + OTP）
+    if (/^(TOTP|令牌|验证码|密钥|动态码)$/i.test(t)) return "";
+    const m = t.match(/^(.+?)\s*(TOTP|令牌|验证码|密钥|动态码)$/i);
     if (m) {
         const prefix = m[1].trim();
         return prefix ? prefix : "";
     }
-    if (/^(TOTP|OTP|验证码|密钥|动态码)$/i.test(t)) return "";
     return null;
 }
 
