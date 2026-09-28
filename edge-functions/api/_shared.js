@@ -270,6 +270,18 @@ export async function getTenantAccessToken(env) {
   return _memToken;
 }
 
+// 人员展示统一样式
+export function personElement(userId) {
+  return {
+    tag: "person",
+    user_id: userId,
+    size: "medium",
+    show_avatar: true,
+    show_name: true,
+    style: "capsule",
+  };
+}
+
 // ---------- OTP 卡片（有效期内） ----------
 export function buildOtpCard(code, remainingSeconds, userId, keyName) {
   return {
@@ -341,12 +353,7 @@ export function buildOtpCard(code, remainingSeconds, userId, keyName) {
               tag: "column",
               width: "auto",
               elements: [
-                {
-                  tag: "person",
-                  size: "medium",
-                  user_id: userId,
-                  margin: "0px 0px 0px 0px",
-                },
+                personElement(userId),
               ],
               vertical_align: "top",
             },
@@ -358,7 +365,7 @@ export function buildOtpCard(code, remainingSeconds, userId, keyName) {
     header: {
       title: {
         tag: "plain_text",
-        content: keyName ? `${keyName} OTP动态密钥` : "OTP动态密钥",
+        content: keyName ? `${keyName} TOTP密钥` : "TOTP密钥",
       },
       subtitle: { tag: "plain_text", content: "" },
       text_tag_list: [
@@ -369,7 +376,6 @@ export function buildOtpCard(code, remainingSeconds, userId, keyName) {
         },
       ],
       template: "blue",
-      icon: { tag: "standard_icon", token: "lock" },
       padding: "12px 8px 12px 8px",
     },
   };

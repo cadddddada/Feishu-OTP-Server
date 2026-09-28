@@ -81,6 +81,18 @@ function jsonResponse(data, status = 200) {
   });
 }
 
+// 人员展示统一样式（与 Edge 保持一致）
+function personElement(userId) {
+  return {
+    tag: "person",
+    user_id: userId,
+    size: "medium",
+    show_avatar: true,
+    show_name: true,
+    style: "capsule",
+  };
+}
+
 // ---------- 卡片构建（与 Edge 保持一致） ----------
 function buildOtpCard(code, remainingSeconds, userId, keyName) {
   return {
@@ -152,12 +164,7 @@ function buildOtpCard(code, remainingSeconds, userId, keyName) {
               tag: "column",
               width: "auto",
               elements: [
-                {
-                  tag: "person",
-                  size: "medium",
-                  user_id: userId,
-                  margin: "0px 0px 0px 0px",
-                },
+                personElement(userId),
               ],
               vertical_align: "top",
             },
@@ -169,7 +176,7 @@ function buildOtpCard(code, remainingSeconds, userId, keyName) {
     header: {
       title: {
         tag: "plain_text",
-        content: keyName ? `${keyName} OTP动态密钥` : "OTP动态密钥",
+        content: keyName ? `${keyName} TOTP密钥` : "TOTP密钥",
       },
       subtitle: { tag: "plain_text", content: "" },
       text_tag_list: [
@@ -180,7 +187,6 @@ function buildOtpCard(code, remainingSeconds, userId, keyName) {
         },
       ],
       template: "blue",
-      icon: { tag: "standard_icon", token: "lock" },
       padding: "12px 8px 12px 8px",
     },
   };
@@ -256,12 +262,7 @@ function buildExpiredCard(userId, keyName) {
               tag: "column",
               width: "auto",
               elements: [
-                {
-                  tag: "person",
-                  size: "medium",
-                  user_id: userId,
-                  margin: "0px 0px 0px 0px",
-                },
+                personElement(userId),
               ],
               vertical_align: "top",
             },
@@ -273,7 +274,7 @@ function buildExpiredCard(userId, keyName) {
     header: {
       title: {
         tag: "plain_text",
-        content: keyName ? `${keyName} OTP动态密钥` : "OTP动态密钥",
+        content: keyName ? `${keyName} TOTP密钥` : "TOTP密钥",
       },
       subtitle: { tag: "plain_text", content: "" },
       text_tag_list: [
@@ -284,7 +285,6 @@ function buildExpiredCard(userId, keyName) {
         },
       ],
       template: "blue",
-      icon: { tag: "standard_icon", token: "lock" },
       padding: "12px 8px 12px 8px",
     },
   };

@@ -14,7 +14,7 @@ Feishu event ──► Edge Function /api/feishu_callback
                   │    ├─ application.bot.menu_v6   custom menu: the event ID is the key identifier;
                   │    │                            ADD_TOTP pushes the self-service add-key card
                   │    └─ card.action.trigger       card callback: write KV synchronously and return the updated card
-                  ├─ Send text / OTP card / form card / management notification (fetch to Feishu)
+                  ├─ Send text / TOTP card / form card / management notification (fetch to Feishu)
                   ├─ Pre-generate the next-window renewal code (codeB) and obtain the Feishu auth token (with expiry)
                   │
                   ├─ After sending the card: AES-256-GCM encrypted + HMAC-signed handoff to Cloud /api/expiry (template code + fill data + target time, carrying codeB and the token)
@@ -29,10 +29,10 @@ Cloud Function /api/expiry (scheduled HTTP sender, direct to Feishu)
 
 ## Key Features
 
-- **OTP Generation and Query**: Send "xxxOTP / xxx验证码 / xxx密钥 / xxx动态码" to get a dynamic code, e.g. "阿里云OTP"
+- **TOTP Generation and Query**: Send "xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码" to get a dynamic code, e.g. "阿里云TOTP" (the legacy "阿里云OTP" form still works)
 - **Self-service key management**: Send "添加密钥 XXX <secret/otpauth link>" in a private chat to add/update a key in KV
-- **Custom menu events**: A bot custom-menu item's event ID is used directly as the key identifier, so a click pushes the OTP card (event ID `YUNPAN` -> reads `YUNPAN_TOTP_SECRET`)
-- **Self-service add-key from the menu**: The `ADD_TOTP` event ID pushes a form card; the user fills in an identifier and a secret/otpauth link, the backend converts Chinese to pinyin and uppercases the letters before writing KV, and the card is updated to "已保存 密钥名称：xxx 添加时间：xxx"
+- **Custom menu events**: A bot custom-menu item's event ID is used directly as the key identifier, so a click pushes the TTOTP card (event ID `YUNPAN` -> reads `YUNPAN_TOTP_SECRET`)
+- **Self-service add-key from the menu**: The `ADD_TOTP` event ID pushes a form card; the user fills in an identifier and a secret/otpauth link, the backend converts Chinese to pinyin and uppercases the letters before writing KV, and the result card shows three rows "密钥名称 / 添加时间 / 添加人" (no "已保存" wording — the header carries the status)
 - **No key caching**: Every OTP generation reads KV in real time on the Edge side (binding variable `KV_NAMESPACE`, namespace `TOTP_SERVER`)
 - **Card renewal and expiry update**: When the first key expires, the Cloud timer triggers Edge to push a renewed key; when it expires again, the card is marked "expired"
 - **Merged management notification**: One request pushes 2 OTPs in total (including the renewal), and the management group card merges them into one (request time / final expiry time / push count)
@@ -46,7 +46,7 @@ feishu-otp-server/
 ├── .env                         # Environment variables configuration
 ├── package.json                 # Node.js project config (dependency: pinyin-pro)
 ├── edge-functions/
-│   ├── api/_shared.js           # Shared utilities: signing / KV / token / base resolution / OTP card (no route)
+│   ├── api/_shared.js           # Shared utilities: signing / KV / token / base resolution / TOTP card (no route)
 │   ├── api/feishu_callback.js   # Edge callback entry (route /api/feishu_callback)
 ├── cloud-functions/
 │   └── api/expiry.js            # Cloud scheduled HTTP sender: record + direct Feishu PATCH (route /api/expiry)
@@ -71,11 +71,11 @@ feishu-otp-server/
 - Feishu callback protocol: URL verification, Token/signature verification, AES decryption, timeliness check; 2.0 events read `event_type` / `token` from `header` (1.0 top-level fields stay supported)
 - Event routing: `im.message.receive_v1` (message), `application.bot.menu_v6` (custom menu), `card.action.trigger` (card callback)
 - OTP query, private-chat key add, text/card/management notifications
-- Menu events: `event_key` is normalized by `normalizeIdentifier` and used as the key identifier, reusing the OTP card flow; the reserved event ID `ADD_TOTP` triggers self-service add-key
+- Menu events: `event_key` is normalized by `normalizeIdentifier` and used as the key identifier, reusing the TOTP card flow; the reserved event ID `ADD_TOTP` triggers self-service add-key
 - Card callbacks: handled synchronously (response within 3 s), parse `action.form_value`, write KV, and reply `{toast, card:{type:'raw', data}}` to update the card; on validation failure only an error Toast is returned (the original card and typed values stay)
 - Identifier normalization `normalizeIdentifier`: Chinese to pinyin, uppercase letters, strip spaces and symbols (`阿里云` / `ali yun` / `ali-yun` -> `ALIYUN`)
 - Secret parsing `parseSecretInput`: accepts a raw base32 secret or an `otpauth://` link (reads the `secret` parameter; falls back to the link label when the identifier is empty)
-- After sending the OTP card, POSTs a signed `{command:'schedule_tasks', tasks:[{template, data, targetAt}]}` to Cloud `/api/expiry` (tasks carry the pre-generated renewal code and the Feishu auth token with its expiry; absolute timestamps avoid network-delay accumulation)
+- After sending the TOTP card, POSTs a signed `{command:'schedule_tasks', tasks:[{template, data, targetAt}]}` to Cloud `/api/expiry` (tasks carry the pre-generated renewal code and the Feishu auth token with its expiry; absolute timestamps avoid network-delay accumulation)
 - The management notification is merged: request time = the request moment, expiry time = the final expiry after renewal, push count = 2
 
 ### cloud-functions/api/expiry.js (Cloud Function, scheduled HTTP sender)
@@ -90,10 +90,10 @@ feishu-otp-server/
 Every Feishu callback hits the same URL `https://[domain]/api/feishu_callback`, goes through shared validation, and is then routed by event type.
 
 1. **Shared validation**: GET health check; `url_verification` challenge echo; Token check (2.0 events use `header.token`); `x-lark-signature` verification (SHA-256 over `timestamp + nonce + FEISHU_ENCRYPT_KEY + body`); AES-CBC decryption of the `encrypt` field when `FEISHU_ENCRYPT_KEY` is set; message timeliness check.
-2. **Message event `im.message.receive_v1`**: `添加密钥 XXX <secret>` writes KV; `xxxOTP / xxx验证码 / xxx密钥 / xxx动态码` reads KV and builds the OTP card; anything else returns the help text.
-3. **Custom menu event `application.bot.menu_v6`**: `event_key` is the key identifier and reuses the OTP card flow; `ADD_TOTP` pushes the self-service add-key form card.
-4. **Card callback `card.action.trigger`**: form submits are handled synchronously (response within 3 s); on success it replies `{toast, card:{type:'raw', data}}` and updates the card to "已保存 密钥名称：xxx 添加时间：xxx"; on failure it replies only an error Toast.
-5. **After the OTP card**: renewal/expiry tasks (pre-generated code + token + absolute timestamps) are encrypted, signed and handed to Cloud `/api/expiry`, which PATCHes the card straight to Feishu when due.
+2. **Message event `im.message.receive_v1`**: `添加密钥 XXX <secret>` writes KV; `xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码` reads KV and builds the TTOTP card; anything else returns the help text.
+3. **Custom menu event `application.bot.menu_v6`**: `event_key` is the key identifier and reuses the TTOTP card flow; `ADD_TOTP` pushes the self-service add-key form card.
+4. **Card callback `card.action.trigger`**: form submits are handled synchronously (response within 3 s); on success it replies `{toast, card:{type:'raw', data}}` and shows three rows "密钥名称 / 添加时间 / 添加人"; on failure it replies only an error Toast.
+5. **After the TOTP card**: renewal/expiry tasks (pre-generated code + token + absolute timestamps) are encrypted, signed and handed to Cloud `/api/expiry`, which PATCHes the card straight to Feishu when due.
 6. Message and menu events return 200 immediately and run their logic under `context.waitUntil`; card callbacks must answer synchronously and therefore skip the async branch.
 
 ## OTP Key Add Paths
@@ -105,7 +105,7 @@ Every Feishu callback hits the same URL `https://[domain]/api/feishu_callback`, 
 | Menu self-service | Custom menu `ADD_TOTP` -> form card -> save | Same as above; falls back to the otpauth label when the identifier is empty | `{IDENTIFIER}_TOTP_SECRET` |
 
 - The secret must be base32-decodable before it is written; `ADD_TOTP` is a reserved identifier (normalized to `ADDTOTP`) and cannot be used as a key name.
-- Writes overwrite: re-adding the same identifier updates it; the `xxxOTP` query command and the menu event ID share one identifier namespace.
+- Writes overwrite: re-adding the same identifier updates it; the `xxxTOTP` query command (legacy `xxxOTP` still accepted) and the menu event ID share one identifier namespace.
 - Secrets are never cached: every OTP generation reads KV in real time.
 
 ## Installation and Configuration

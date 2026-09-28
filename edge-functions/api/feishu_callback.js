@@ -21,6 +21,7 @@ import {
     getTenantAccessToken,
     json,
     kvPut,
+    personElement,
     resolveBase,
     safeEqual,
     signPayload,
@@ -102,13 +103,14 @@ function sendHelp(env, receiveId) {
     return sendTextMessage(
         env,
         receiveId,
-        "发送\u201CxxxOTP\u201D或\u201Cxxx验证码\u201D获取动态密码，例如\u201C阿里云OTP\u201D。\n添加/更新密钥：私聊发送\u201C添加密钥 XXX <密钥>\u201D，例如\u201C添加密钥 阿里云 JBSWY3DPEHPK3PXP\u201D；也可点击机器人自定义菜单「ADD_TOTP」自助填写。"
+        "发送\u201CxxxTOTP\u201D或\u201Cxxx验证码\u201D获取动态密码，例如\u201C阿里云TOTP\u201D。\n添加/更新密钥：私聊发送\u201C添加密钥 XXX <密钥>\u201D，例如\u201C添加密钥 阿里云 JBSWY3DPEHPK3PXP\u201D；也可点击机器人自定义菜单「ADD_TOTP」自助填写。"
     );
 }
 
 // ==================== 卡片构建 ====================
-function buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay) {
-    const row = (label, content) => ({
+// 通知卡片行样式：左标签 + 右内容（管理群通知与自助添加结果卡片共用）
+function row(label, content) {
+    return {
         tag: "column_set",
         horizontal_spacing: "8px",
         horizontal_align: "left",
@@ -141,20 +143,17 @@ function buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay) {
             },
         ],
         margin: "0px 0px 0px 0px",
-    });
+    };
+}
 
+function buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay) {
     return {
         schema: "2.0",
         config: {update_multi: true},
         body: {
             direction: "vertical",
             elements: [
-                row("数据获取人：", {
-                    tag: "person",
-                    size: "medium",
-                    user_id: userId,
-                    margin: "0px 0px 0px 0px",
-                }),
+                row("数据获取人：", personElement(userId)),
                 row("获取密钥：", {
                     tag: "markdown",
                     content: keyDisplay,
@@ -179,10 +178,9 @@ function buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay) {
             ],
         },
         header: {
-            title: {tag: "plain_text", content: "OTP动态密钥获取日志"},
+            title: {tag: "plain_text", content: "TOTP密钥获取日志"},
             subtitle: {tag: "plain_text", content: ""},
             template: "blue",
-            icon: {tag: "standard_icon", token: "lock"},
             padding: "12px 8px 12px 8px",
         },
     };
@@ -223,7 +221,7 @@ async function sendManagementCard(
 ) {
     const webhook = env.MANAGEMENT_WEBHOOK || "";
     if (!webhook) return;
-    const keyDisplay = keyName ? `${keyName} OTP` : "默认 OTP";
+    const keyDisplay = keyName ? `${keyName} TOTP` : "默认 TOTP";
     await fetch(webhook, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
@@ -289,41 +287,48 @@ function buildAddTotpCard() {
             ],
         },
         header: {
-            title: {tag: "plain_text", content: "自助添加 TOTP 密钥"},
+            title: {tag: "plain_text", content: "添加TOTP密钥"},
             subtitle: {tag: "plain_text", content: ""},
             template: "blue",
-            icon: {tag: "standard_icon", token: "lock"},
             padding: "12px 8px 12px 8px",
         },
     };
 }
 
-function buildSavedCard(keyName, timeStr) {
+function buildSavedCard(keyName, timeStr, userId = null) {
+    const elements = [
+        row("密钥名称：", {
+            tag: "markdown",
+            content: keyName,
+            text_align: "left",
+            text_size: "normal",
+            margin: "2px 0px 0px 0px",
+        }),
+        row("添加时间：", {
+            tag: "markdown",
+            content: timeStr,
+            text_align: "left",
+            text_size: "normal",
+            margin: "2px 0px 0px 0px",
+        }),
+    ];
+    if (userId) {
+        elements.push(row("添加人：", personElement(userId)));
+    }
+    elements.push({
+        tag: "markdown",
+        content: `发送「${keyName}TOTP」即可获取动态密码。`,
+        text_size: "normal",
+        margin: "8px 0px 0px 0px",
+    });
     return {
         schema: "2.0",
         config: {update_multi: true},
-        body: {
-            direction: "vertical",
-            elements: [
-                {
-                    tag: "markdown",
-                    content: `已保存 密钥名称：${keyName} 添加时间：${timeStr}`,
-                    text_size: "normal",
-                    margin: "0px 0px 0px 0px",
-                },
-                {
-                    tag: "markdown",
-                    content: `发送「${keyName}OTP」即可获取动态密码。`,
-                    text_size: "normal",
-                    margin: "4px 0px 0px 0px",
-                },
-            ],
-        },
+        body: {direction: "vertical", elements},
         header: {
-            title: {tag: "plain_text", content: "TOTP 密钥已保存"},
+            title: {tag: "plain_text", content: "TOTP密钥已保存"},
             subtitle: {tag: "plain_text", content: ""},
             template: "green",
-            icon: {tag: "standard_icon", token: "lock"},
             padding: "12px 8px 12px 8px",
         },
     };
@@ -500,12 +505,12 @@ async function handleMessageEvent(env, context, eventData) {
 
         const chatType = message.chat_type || "";
 
-        // 添加/更新 TOTP 密钥：添加密钥 XXX <密钥>（仅私聊）
+        // 添加/更新 TOTP密钥：添加密钥 XXX <密钥>（仅私聊）
         if (await handleAddSecret(env, text, userId, chatType)) {
             return;
         }
 
-        // 解析多密钥格式: xxxOTP / xxx验证码 / xxx密钥 / xxx动态码
+        // 解析多密钥格式: xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码
         const keyPrefix = parseOtpKey(text);
         if (keyPrefix !== null) {
             const keyName = keyPrefix ? normalizeIdentifier(keyPrefix) || null : null;
@@ -630,7 +635,7 @@ async function handleAddSecret(env, text, userId, chatType = "") {
     await sendTextMessage(
         env,
         userId,
-        `已添加/更新密钥 ${keyName}（存储键：${kvKey}）。发送\u201C${keyName}OTP\u201D即可获取动态密码。`
+        `已添加/更新密钥 ${keyName}（存储键：${kvKey}）。发送\u201C${keyName}TOTP\u201D即可获取动态密码。`
     );
     return true;
 }
@@ -641,15 +646,17 @@ async function handleAddSecret(env, text, userId, chatType = "") {
 async function handleCardAction(env, eventData) {
     const event = eventData.event || {};
     const action = event.action || {};
+    const operator = event.operator || {};
+    const userId = operator.open_id || operator.user_id || null;
     const formValue = action.form_value;
     console.log(`[CARD] 收到卡片交互 tag=${action.tag || ""} name=${action.name || ""}`);
     if (action.tag === "button" && formValue && typeof formValue === "object") {
-        return await handleAddTotpSubmit(env, formValue);
+        return await handleAddTotpSubmit(env, formValue, userId);
     }
     return {toast: {type: "info", content: "暂不支持的操作"}};
 }
 
-async function handleAddTotpSubmit(env, formValue) {
+async function handleAddTotpSubmit(env, formValue, userId = null) {
     const values = formValue && typeof formValue === "object" ? formValue : {};
     const identifierRaw = String(values.identifier ?? "").trim();
     const parsed = parseSecretInput(values.secret);
@@ -681,18 +688,18 @@ async function handleAddTotpSubmit(env, formValue) {
     console.log(`[CARD] 自助添加密钥成功: ${kvKey}`);
     return {
         toast: {type: "success", content: "已保存"},
-        card: {type: "raw", data: buildSavedCard(keyName, timeStr)},
+        card: {type: "raw", data: buildSavedCard(keyName, timeStr, userId)},
     };
 }
 
 function parseOtpKey(text) {
     const t = String(text || "").trim();
-    const m = t.match(/^(.+?)\s*(OTP|验证码|密钥|动态码)$/i);
+    const m = t.match(/^(.+?)\s*(TOTP|OTP|验证码|密钥|动态码)$/i);
     if (m) {
         const prefix = m[1].trim();
         return prefix ? prefix : "";
     }
-    if (/^(OTP|验证码|密钥|动态码)$/i.test(t)) return "";
+    if (/^(TOTP|OTP|验证码|密钥|动态码)$/i.test(t)) return "";
     return null;
 }
 
