@@ -714,7 +714,7 @@ async function handleSecretCommand(env, text, userId, chatType = "") {
     await sendTextMessage(
         env,
         userId,
-        `已${isAdd ? "添加" : "更新"}密钥 ${keyName}（存储键：${kvKey}）。发送\u201C${keyName}TOTP\u201D即可获取动态密码。`
+        `已${isAdd ? "添加" : "更新"}密钥 ${keyName}（存储键：${kvKey}）。发送\u201C${keyName} TOTP\u201D即可获取动态密码。`
     );
     return true;
 }
