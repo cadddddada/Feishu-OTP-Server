@@ -14,7 +14,7 @@ Feishu event ──► Edge Function /api/feishu_callback
                   │    ├─ application.bot.menu_v6   custom menu: the event ID is the key identifier;
                   │    │                            ADD_TOTP pushes the self-service add-key card
                   │    └─ card.action.trigger       card callback: write KV synchronously and return the updated card
-                  ├─ Send text / TOTP card / form card / management notification (fetch to Feishu)
+                  ├─ Send text / TOTP card / form card / audit notification (fetch to Feishu)
                   ├─ Pre-generate the next-window renewal code (codeB) and obtain the Feishu auth token (with expiry)
                   │
                   ├─ After sending the card: AES-256-GCM encrypted + HMAC-signed handoff to Cloud /api/expiry (template code + fill data + target time, carrying codeB and the token)
@@ -35,8 +35,8 @@ Cloud Function /api/expiry (scheduled HTTP sender, direct to Feishu)
 - **Self-service add-key from the menu**: The `ADD_TOTP` event ID pushes a form card; the user fills in an identifier and a secret/otpauth link, the backend converts Chinese to pinyin and uppercases the letters before writing KV, and the result card shows three rows "密钥名称 / 添加时间 / 添加人" (no "已保存" wording — the header carries the status); when the identifier already exists nothing is written and the header becomes "TOTP密钥未保存" with an update hint
 - **No key caching**: Every OTP generation reads KV in real time on the Edge side (binding variable `KV_NAMESPACE`, namespace `TOTP_SERVER`)
 - **Card renewal and expiry update**: When the first key expires, the Cloud timer triggers Edge to push a renewed key; when it expires again, the card is marked "expired"
-- **Merged management notification**: One request pushes 2 OTPs in total (including the renewal), and the management group card merges them into one (request time / final expiry time / push count)
-- **Key-operation audit log**: after a successful create / update / delete, an audit card is pushed to the management webhook (operator / action / key name / time / source)
+- **Unified audit log**: after a successful read (TOTP fetch) / create / update / delete, a "TOTP密钥审计日志" card is pushed to the management webhook with operator / action / key name / time / [expiry] / source; a read carries the "expiry" row (final expiry after renewal), and failed or rejected operations are not pushed
+- **Key recycle bin**: overwritten / deleted keys are appended to the single KV entry `TOTP_RECYCLE_BIN` (a JSON array with `key` / `value` / `deletedAt` / `operatorId` / `action`); entries older than 90 days are lazily pruned on each write
 - **tenant_access_token never travels over APIs**: the token is only fetched, cached and used inside Edge; internal payloads never contain it
 - **Encrypted and signed internal communication**: sensitive Edge → Cloud payloads (renewal code / Feishu token) are AES-256-GCM encrypted, then signed with `EDGE_SYNC_SECRET` + HMAC-SHA256 over a canonical JSON envelope, valid for 60 seconds (`createdAt`)
 
@@ -71,13 +71,13 @@ feishu-otp-server/
 
 - Feishu callback protocol: URL verification, Token/signature verification, AES decryption, timeliness check; 2.0 events read `event_type` / `token` from `header` (1.0 top-level fields stay supported)
 - Event routing: `im.message.receive_v1` (message), `application.bot.menu_v6` (custom menu), `card.action.trigger` (card callback)
-- OTP query, private-chat key add, text/card/management notifications
+- OTP query, private-chat key management, text/card/audit notifications
 - Menu events: `event_key` is normalized by `normalizeIdentifier` and used as the key identifier, reusing the TOTP card flow; the reserved event ID `ADD_TOTP` triggers self-service add-key
 - Card callbacks: handled synchronously (response within 3 s), parse `action.form_value`, write KV, and reply `{toast, card:{type:'raw', data}}` to update the card; on validation failure only an error Toast is returned (the original card and typed values stay)
 - Identifier normalization `normalizeIdentifier`: Chinese to pinyin, uppercase letters, strip spaces and symbols (`阿里云` / `ali yun` / `ali-yun` -> `ALIYUN`)
 - Secret parsing `parseSecretInput`: accepts a raw base32 secret or an `otpauth://` link (reads the `secret` parameter; falls back to the link label when the identifier is empty)
 - After sending the TOTP card, POSTs a signed `{command:'schedule_tasks', tasks:[{template, data, targetAt}]}` to Cloud `/api/expiry` (tasks carry the pre-generated renewal code and the Feishu auth token with its expiry; absolute timestamps avoid network-delay accumulation)
-- The management notification is merged: request time = the request moment, expiry time = the final expiry after renewal, push count = 2
+- Unified audit notification: read (TOTP fetch, action=读取, time = request moment, expiry = final expiry after renewal) / create / update / delete all push the same audit card; the source distinguishes "私聊命令 / 自定义菜单 / 菜单自助添加"
 
 ### cloud-functions/api/expiry.js (Cloud Function, scheduled HTTP sender)
 
@@ -94,7 +94,7 @@ Every Feishu callback hits the same URL `https://[domain]/api/feishu_callback`, 
 2. **Message event `im.message.receive_v1`**: `添加密钥 XXX <secret>` creates only (refused when it already exists); `更新密钥 XXX <new secret> <password>` updates only (refused when it does not exist or the password is wrong); `删除密钥 XXX <password>` deletes (refused when it does not exist or the password is wrong); `xxxTOTP / xxxOTP / xxx验证码 / xxx密钥 / xxx动态码` reads KV and builds the TOTP card; anything else returns the help text.
 3. **Custom menu event `application.bot.menu_v6`**: `event_key` is the key identifier and reuses the TOTP card flow; `ADD_TOTP` pushes the self-service add-key form card.
 4. **Card callback `card.action.trigger`**: form submits are handled synchronously (response within 3 s); on success it replies `{toast, card:{type:'raw', data}}` and shows three rows "密钥名称 / 添加时间 / 添加人"; when the identifier already exists nothing is written and the header shows "TOTP密钥未保存" with an update hint; on validation failure it replies only an error Toast (the audit notification is dispatched via `context.waitUntil`, so it never eats into the 3 s window).
-5. **Key-operation audit**: after a successful create / update / delete, a "TOTP密钥审计日志" card is pushed to `MANAGEMENT_WEBHOOK` (operator / action / key name / time / source); failed or rejected operations are not pushed.
+5. **Unified audit**: after a successful read (TOTP fetch) / create / update / delete, a "TOTP密钥审计日志" card is pushed to `MANAGEMENT_WEBHOOK` (operator / action / key name / time / [expiry — read only] / source); failed or rejected operations are not pushed.
 6. **After the TOTP card**: renewal/expiry tasks (pre-generated code + token + absolute timestamps) are encrypted, signed and handed to Cloud `/api/expiry`, which PATCHes the card straight to Feishu when due.
 7. Message and menu events return 200 immediately and run their logic under `context.waitUntil`; card callbacks must answer synchronously and therefore skip the async branch.
 
@@ -110,6 +110,7 @@ Every Feishu callback hits the same URL `https://[domain]/api/feishu_callback`, 
 - No overwrite: "添加密钥" and the menu self-service add are both refused for an existing identifier (they point to "更新密钥"), and only "更新密钥" overwrites the stored value; when the menu add hits an existing identifier the header shows "TOTP密钥未保存".
 - Update/delete require the operation password in `TOTP_ADMIN_PASSWORD`; when it is unset they are disallowed entirely, and a wrong password is always rejected (constant-time comparison).
 - The `xxxTOTP` query command (legacy `xxxOTP` still accepted) and the menu event ID share one identifier namespace.
+- Recycle bin: overwritten / deleted keys are appended to the KV entry `TOTP_RECYCLE_BIN` with `key` (original storage key) / `value` (old value) / `deletedAt` (ms timestamp) / `operatorId` (open_id) / `action` (overwrite or delete); every write first prunes entries older than 90 days (lazy cleanup), and the list can be inspected or restored straight from the KV console.
 - Secrets are never cached: every OTP generation reads KV in real time.
 
 ## Installation and Configuration

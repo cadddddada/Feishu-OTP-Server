@@ -14,6 +14,7 @@
 
 import {pinyin} from "pinyin-pro";
 import {
+    appendToRecycleBin,
     base32Decode,
     buildOtpCard,
     encryptPayload,
@@ -151,46 +152,6 @@ function row(label, content, options = {}) {
     };
 }
 
-function buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay) {
-    return {
-        schema: "2.0",
-        config: {update_multi: true},
-        body: {
-            direction: "vertical",
-            elements: [
-                row("数据获取人：", personElement(userId), {align: "center"}),
-                row("获取密钥：", {
-                    tag: "markdown",
-                    content: keyDisplay,
-                    text_align: "left",
-                    text_size: "normal",
-                    margin: "2px 0px 0px 0px",
-                }),
-                row("获取时间：", {
-                    tag: "markdown",
-                    content: requestTime,
-                    text_align: "left",
-                    text_size: "normal",
-                    margin: "2px 0px 0px 0px",
-                }),
-                row("密钥过期时间：", {
-                    tag: "markdown",
-                    content: expireTimeStr,
-                    text_align: "left",
-                    text_size: "normal",
-                    margin: "2px 0px 0px 0px",
-                })
-            ],
-        },
-        header: {
-            title: {tag: "plain_text", content: "TOTP密钥获取日志"},
-            subtitle: {tag: "plain_text", content: ""},
-            template: "blue",
-            padding: "12px 8px 12px 8px",
-        },
-    };
-}
-
 async function sendInteractiveCard(env, receiveId, card, token = null) {
     const bearer = token || (await getTenantAccessToken(env)).token;
     const url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id";
@@ -217,31 +178,11 @@ async function sendOtpCard(env, receiveId, code, remainingSeconds, userId, keyNa
     );
 }
 
-async function sendManagementCard(
-    env,
-    userId,
-    requestTime,
-    expireTimeStr,
-    keyName = null
-) {
-    const webhook = env.MANAGEMENT_WEBHOOK || "";
-    if (!webhook) return;
-    const keyDisplay = keyName ? `${keyName} TOTP` : "默认 TOTP";
-    await fetch(webhook, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({
-            msg_type: "interactive",
-            card: buildManagementCard(userId, requestTime, expireTimeStr, keyDisplay),
-        }),
-    });
-}
-
 // ==================== 密钥操作审计通知（Webhook） ====================
-// 新建 / 更新 / 删除成功后推送一条审计卡片到管理群，作为审计日志
-const AUDIT_TEMPLATES = {新建: "green", 更新: "orange", 删除: "red"};
+// 读取（获取 TOTP）/ 新建 / 更新 / 删除成功后推送一张审计卡片到管理群，统一作为审计日志
+const AUDIT_TEMPLATES = {读取: "blue", 新建: "green", 更新: "orange", 删除: "red"};
 
-function buildAuditCard(action, keyName, userId, timeStr, source) {
+function buildAuditCard(action, keyName, userId, timeStr, source, expireTimeStr = null) {
     const value = (content) => ({
         tag: "markdown",
         content,
@@ -249,19 +190,20 @@ function buildAuditCard(action, keyName, userId, timeStr, source) {
         text_size: "normal",
         margin: "2px 0px 0px 0px",
     });
+    const elements = [
+        row("操作人：", personElement(userId), {align: "center"}),
+        row("操作类型：", value(action)),
+        row("密钥名称：", value(keyName)),
+        row("操作时间：", value(timeStr)),
+    ];
+    if (expireTimeStr) {
+        elements.push(row("过期时间：", value(expireTimeStr)));
+    }
+    elements.push(row("操作来源：", value(source)));
     return {
         schema: "2.0",
         config: {update_multi: true},
-        body: {
-            direction: "vertical",
-            elements: [
-                row("操作人：", personElement(userId), {align: "center"}),
-                row("操作类型：", value(action)),
-                row("密钥名称：", value(keyName)),
-                row("操作时间：", value(timeStr)),
-                row("操作来源：", value(source)),
-            ],
-        },
+        body: {direction: "vertical", elements},
         header: {
             title: {tag: "plain_text", content: "TOTP密钥审计日志"},
             subtitle: {tag: "plain_text", content: ""},
@@ -271,7 +213,7 @@ function buildAuditCard(action, keyName, userId, timeStr, source) {
     };
 }
 
-async function sendAuditNotification(env, action, keyName, userId, source) {
+async function sendAuditNotification(env, action, keyName, userId, source, expireTimeStr = null) {
     const webhook = env.MANAGEMENT_WEBHOOK || "";
     if (!webhook) {
         console.log(`[AUDIT] 未配置 MANAGEMENT_WEBHOOK，跳过 ${action} ${keyName}`);
@@ -284,7 +226,7 @@ async function sendAuditNotification(env, action, keyName, userId, source) {
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({
                 msg_type: "interactive",
-                card: buildAuditCard(action, keyName, userId, timeStr, source),
+                card: buildAuditCard(action, keyName, userId, timeStr, source, expireTimeStr),
             }),
         });
         console.log(`[AUDIT] ${action} ${keyName} by ${userId || "unknown"}（${source}）`);
@@ -380,7 +322,7 @@ function buildSavedCard(keyName, timeStr, userId = null, saved = true) {
         tag: "markdown",
         content: saved
             ? `发送「${keyName} TOTP」即可获取动态密码。`
-            : `标识符 ${keyName} 已被占用，本次未保存；如需更新请发送「更新密钥 ${keyName} <密钥>」。`,
+            : `标识符 ${keyName} 已被占用，本次未保存；如需更新请发送「更新密钥 ${keyName} <密钥> <密码>」；如需删除请发送「删除密钥 ${keyName} <密码>」。`,
         text_size: "normal",
         margin: "8px 0px 0px 0px",
     });
@@ -540,7 +482,7 @@ async function handleMenuEvent(env, context, eventData) {
             return;
         }
         console.log(`[MENU] 菜单事件 ${eventKey} -> 密钥标识符 ${keyName}`);
-        await sendOtpForKey(env, context, userId, keyName);
+        await sendOtpForKey(env, context, userId, keyName, "自定义菜单");
     } catch (e) {
         console.error(`处理菜单事件出错: ${e}`);
     }
@@ -587,7 +529,7 @@ async function handleMessageEvent(env, context, eventData) {
 }
 
 // 生成 OTP 卡片并按绝对时间戳安排续期/过期（消息事件与菜单事件共用）
-async function sendOtpForKey(env, context, userId, keyName) {
+async function sendOtpForKey(env, context, userId, keyName, source = "私聊命令") {
     // 并行：KV 读密钥 + TOTP 生成 与 token 获取互不依赖，同时发起
     const otpTask = generateOtp(keyName);
     const tokenTask = getTenantAccessToken(env);
@@ -599,13 +541,12 @@ async function sendOtpForKey(env, context, userId, keyName) {
     }
 
     const remainingSeconds = Math.max(1, Math.floor(expireTs - Date.now() / 1000));
-    const requestTimeStr = formatTime(Math.floor(Date.now() / 1000));
     // 续期：首次密钥在 expireTs 过期，续期后的新密钥再保持一个 TOTP 周期（30 秒）
     const renewAt = expireTs * 1000;
     const expireAt = (expireTs + 30) * 1000;
     const finalExpireTimeStr = formatTime(expireTs + 30);
 
-    // 并行：发送 OTP 卡片 与 合并的管理群通知（2 次推送日志合并）互不依赖；
+    // 并行：发送 OTP 卡片 与 读取审计（获取时间 / 续期后最终过期时间）互不依赖；
     // 卡片返回后立即把续期/过期定时任务转交云函数
     const cardTask = sendOtpCard(
         env,
@@ -616,12 +557,13 @@ async function sendOtpForKey(env, context, userId, keyName) {
         resolvedName,
         tokenInfo.token
     );
-    const mgmtTask = sendManagementCard(
+    const auditTask = sendAuditNotification(
         env,
+        "读取",
+        resolvedName || "默认",
         userId,
-        requestTimeStr,
-        finalExpireTimeStr,
-        resolvedName
+        source,
+        finalExpireTimeStr
     );
     const messageId = await cardTask;
     console.log(`[ASYNC] 卡片已发送 message_id=${messageId}，转交云函数安排续期与过期`);
@@ -650,13 +592,26 @@ async function sendOtpForKey(env, context, userId, keyName) {
         targetAt: expireAt,
     };
     await sendTasksInCloud(env, context, [renewTask, expireTask]);
-    await mgmtTask;
+    await auditTask;
 
     console.log("[ASYNC] OTP 卡片处理完成");
     return true;
 }
 
-// 密钥指令（仅私聊）：添加密钥（仅新增，已存在不覆盖）/ 更新密钥（仅更新，不存在不新建）
+// 回收站：被覆盖 / 删除的旧密钥统一追加到 TOTP_RECYCLE_BIN（写入失败不影响主流程）
+async function archiveSecret(kvKey, value, userId, action) {
+    const record = {
+        key: kvKey,
+        value: typeof value === "string" ? value : JSON.stringify(value ?? ""),
+        deletedAt: Date.now(),
+        operatorId: userId || null,
+        action,
+    };
+    if (!(await appendToRecycleBin([record]))) {
+        console.error(`[RECYCLE] 回收站写入失败: ${kvKey}`);
+    }
+}
+
 // 密钥指令（仅私聊）：
 //   添加密钥 XXX <密钥>            仅新增，已存在不覆盖
 //   更新密钥 XXX <新密钥> <密码>    仅更新，需操作密码 env.TOTP_ADMIN_PASSWORD
@@ -713,7 +668,8 @@ async function handleSecretCommand(env, text, userId, chatType = "") {
         return true;
     }
     const kvKey = `${keyName}_TOTP_SECRET`;
-    const exists = Boolean(await kvGet(kvKey, ""));
+    const oldValue = await kvGet(kvKey, "");
+    const exists = Boolean(oldValue);
     if (isAdd && exists) {
         await sendTextMessage(env, userId, `标识符 ${keyName} 已存在，未添加。如需更新请发送\u201C更新密钥 ${keyName} <新密钥> <密码>\u201D。`);
         return true;
@@ -729,6 +685,7 @@ async function handleSecretCommand(env, text, userId, chatType = "") {
             await sendTextMessage(env, userId, "密钥删除失败，请稍后重试。");
             return true;
         }
+        await archiveSecret(kvKey, oldValue, userId, "删除");
         await sendAuditNotification(env, "删除", keyName, userId, "私聊命令");
         await sendTextMessage(env, userId, `已删除密钥 ${keyName}（存储键：${kvKey}）。`);
         return true;
@@ -748,6 +705,10 @@ async function handleSecretCommand(env, text, userId, chatType = "") {
     if (!(await kvPut(kvKey, parsed.secret))) {
         await sendTextMessage(env, userId, "密钥保存失败，请稍后重试。");
         return true;
+    }
+    if (!isAdd) {
+        // 覆盖前先把旧密钥存入回收站
+        await archiveSecret(kvKey, oldValue, userId, "覆盖");
     }
     await sendAuditNotification(env, isAdd ? "新建" : "更新", keyName, userId, "私聊命令");
     await sendTextMessage(

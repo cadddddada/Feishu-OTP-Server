@@ -247,6 +247,33 @@ export async function kvDelete(key) {
   }
 }
 
+// ---------- 密钥回收站 ----------
+// 被覆盖 / 删除的密钥统一存放在一条 KV（JSON 数组）里，每条记录：
+//   { key, value, deletedAt, operatorId, action }
+// 懒处理：每次写入前先清理超过保留期（默认 90 天）的旧记录
+export const RECYCLE_BIN_KEY = "TOTP_RECYCLE_BIN";
+export const RECYCLE_BIN_RETENTION_DAYS = 90;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function pruneRecycleBin(items, now = Date.now()) {
+  const cutoff = now - RECYCLE_BIN_RETENTION_DAYS * DAY_MS;
+  return (Array.isArray(items) ? items : []).filter((item) => {
+    const deletedAt = Number(item && item.deletedAt);
+    return Number.isFinite(deletedAt) && deletedAt >= cutoff;
+  });
+}
+
+export async function appendToRecycleBin(records) {
+  const list = (Array.isArray(records) ? records : []).filter(Boolean);
+  if (list.length === 0) return true;
+  const stored = await kvGet(RECYCLE_BIN_KEY, []);
+  const kept = pruneRecycleBin(stored);
+  const purged = (Array.isArray(stored) ? stored.length : 0) - kept.length;
+  const next = kept.concat(list);
+  console.log(`[RECYCLE] 新增 ${list.length} 条，清理超期 ${purged} 条，当前共 ${next.length} 条`);
+  return kvPut(RECYCLE_BIN_KEY, next);
+}
+
 // ---------- tenant_access_token（KV 缓存 + 实例内内存缓存，仅在 Edge 内部使用） ----------
 let _memToken = null;
 
